@@ -1,21 +1,12 @@
 // main.cpp — task creation and core pinning.
 //
 // The firmware is built as FreeRTOS tasks (see the RTOS architecture table in
-// CLAUDE.md). setup() wires up peripherals and spawns each module's task, then the
-// Arduino loop() is left idle — all real work lives in tasks.
-//
-// Modules brought up so far:
-//   [x] Display / UI     (core 0, low priority)
-//   [x] Power / INA226   (core 0, low priority)
-//   [x] Switches/MCP23017 (core 0, low priority)
-//   [x] Gimbal sampling  (core 1, highest)
-//   [x] CRSF / ELRS      (core 0, medium)
+// CLAUDE.md). setup() starts only the app/UI controller task; that task runs the
+// startup sequence (boot screen -> module init -> throttle gate -> mode select) and
+// then owns the active screen. The per-module tasks are spawned by the app task as it
+// steps through the init sequence.
 #include <Arduino.h>
 
-#include "crsf.h"
-#include "gimbals.h"
-#include "power.h"
-#include "switches.h"
 #include "ui.h"
 
 void setup() {
@@ -23,20 +14,8 @@ void setup() {
   delay(200);
   Serial.println("\n[boot] BertRCController");
 
-  if (!power_start()) {
-    Serial.println("[boot] FAILED to start power task");
-  }
-  if (!switches_start()) {
-    Serial.println("[boot] FAILED to start switches task");
-  }
-  if (!gimbals_start()) {
-    Serial.println("[boot] FAILED to start gimbals task");
-  }
-  if (!crsf_start()) {
-    Serial.println("[boot] FAILED to start crsf task");
-  }
   if (!ui_start()) {
-    Serial.println("[boot] FAILED to start UI task");
+    Serial.println("[boot] FAILED to start app task");
   }
 }
 

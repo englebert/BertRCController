@@ -19,9 +19,10 @@ static constexpr int PIN_I2C_SDA = 21;
 static constexpr int PIN_I2C_SCL = 22;
 
 // ---- Gimbals (ADC1, analogContinuous) ----
-// Throttle moved 32 -> 36 (GPIO32 pot channel was dead). GPIO36 = ADC1_CH0, input-only.
-// Erratum 3.11 glitch is mitigated by continuous mode keeping the ADC powered.
-static constexpr int PIN_GIMBAL_THROTTLE = 36;  // ADC1_CH0 (input-only)
-static constexpr int PIN_GIMBAL_YAW = 33;       // ADC1_CH5
-static constexpr int PIN_GIMBAL_PITCH = 34;     // ADC1_CH6 (input-only)
+// Final arrangement, all four verified tracking on hardware (2026-07). GPIO32 is a
+// dead ADC input on this board — do not use. GPIO39 is the remaining spare.
+// GPIO36 erratum 3.11 glitch is mitigated by continuous mode keeping the ADC powered.
+static constexpr int PIN_GIMBAL_THROTTLE = 34;  // ADC1_CH6 (input-only)
+static constexpr int PIN_GIMBAL_YAW = 36;       // ADC1_CH0 (input-only)
+static constexpr int PIN_GIMBAL_PITCH = 33;     // ADC1_CH5
 static constexpr int PIN_GIMBAL_ROLL = 35;      // ADC1_CH7 (input-only)

@@ -61,12 +61,12 @@ pio pkg update               # resolve/update platform + libs
 | 27 | Display backlight | LEDC PWM | — | ADC2 pin, but output-only use = safe |
 | 21 | I2C SDA | I2C0 (Wire) | — | shared: MCP23017 + INA226 |
 | 22 | I2C SCL | I2C0 (Wire) | — | |
-| 36 | Gimbal — throttle | ADC1 | CH0 | input-only. Moved from GPIO32 (dead ADC input on this board) |
-| 33 | Gimbal — yaw | ADC1 | CH5 | |
-| 34 | Gimbal — pitch | ADC1 | CH6 | input-only, no internal pullup |
+| 34 | Gimbal — throttle | ADC1 | CH6 | input-only, no internal pullup |
+| 36 | Gimbal — yaw | ADC1 | CH0 | input-only |
+| 33 | Gimbal — pitch | ADC1 | CH5 | |
 | 35 | Gimbal — roll | ADC1 | CH7 | input-only, no internal pullup |
-| 32 | *unused* | ADC1 | CH4 | was throttle; ADC read stuck ~540, does not respond |
-| 39 | *unused* | ADC1 | CH3 | input-only; read ADC notes before reusing |
+| 32 | **DEAD** | ADC1 | CH4 | ADC input stuck ~540 regardless of drive — do not use on this board |
+| 39 | *unused* | ADC1 | CH3 | input-only spare; read ADC notes before reusing |
 
 **15 GPIO used.** Switches are NOT on ESP32 pins — all on the MCP23017.
 
@@ -175,8 +175,8 @@ src/
 ```
 
 ## Decided
-- Gimbals on internal ADC1 (ADS1115 dropped) — throttle **36** (moved from dead GPIO32),
-  yaw 33, pitch 34, roll 35
+- Gimbals on internal ADC1 (ADS1115 dropped) — final: throttle **34**, yaw **36**,
+  pitch **33**, roll **35** (all verified tracking). GPIO32 is dead; GPIO39 spare.
 - Battery sensing via INA226 only — no resistor divider, GPIO36 free
 - Switches on MCP23017 over I2C — no ESP32 GPIO, no external pull-ups needed
 - INA226 shunt: 0.05 Ω
