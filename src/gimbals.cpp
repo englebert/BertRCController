@@ -1,4 +1,9 @@
-// gimbals.cpp — analogContinuous ADC sampling + filtering (module #4).
+// gimbals.cpp — 4-channel gimbal sampling via oneshot analogRead polling (module #4).
+//
+// NOTE: analogContinuous() (DMA scan) was dropped — on this board it misbehaves with
+// more than 3 channels (individual channels read stuck/ghosted). We poll all four pins
+// with plain analogRead() at ~1 kHz instead, then apply the same median-of-11 + EMA
+// filter. Simpler, and no DMA ISR to collide with flash-cache-disabled windows.
 #include "gimbals.h"
 
 #include <Arduino.h>
@@ -7,15 +12,10 @@
 
 namespace {
 
-// ADC1 pins in scan order: throttle, yaw, pitch, roll.
+// ADC1 pins: throttle, yaw, pitch, roll.
 const uint8_t ADC_PINS[] = {PIN_GIMBAL_THROTTLE, PIN_GIMBAL_YAW, PIN_GIMBAL_PITCH,
                             PIN_GIMBAL_ROLL};
 constexpr int NCH = 4;
-
-// analogContinuous() hardware-averages this many conversions per pin per batch
-// (the "oversample" stage). 20 kHz is the ESP32 continuous-ADC minimum.
-constexpr uint32_t CONVERSIONS_PER_PIN = 8;
-constexpr uint32_t SAMPLE_FREQ_HZ = 20000;  // 20000/(4*8) ~= 625 batches/s
 
 constexpr float EMA_ALPHA = 0.2f;  // light smoothing after the median
 
@@ -54,19 +54,6 @@ TaskHandle_t g_task = nullptr;
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 GimbalState g_state = {0, 0, 0, 0, false};
 
-int pinToIndex(uint8_t pin) {
-  for (int i = 0; i < NCH; ++i)
-    if (ADC_PINS[i] == pin) return i;
-  return -1;
-}
-
-// ADC conversion-done ISR: notify the gimbal task ONLY. Nothing blocking here.
-void ARDUINO_ISR_ATTR adcCallback() {
-  BaseType_t hpw = pdFALSE;
-  vTaskNotifyGiveFromISR(g_task, &hpw);
-  if (hpw) portYIELD_FROM_ISR();
-}
-
 void publish(const int16_t v[NCH], bool valid) {
   portENTER_CRITICAL(&g_mux);
   g_state.throttle = v[0];
@@ -78,53 +65,42 @@ void publish(const int16_t v[NCH], bool valid) {
 }
 
 void gimbalsTask(void*) {
-  adc_continuous_data_t* result = nullptr;
-  for (;;) {
-    // Block until the ADC ISR notifies a full DMA batch is ready.
-    if (ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000)) == 0) {
-      continue;  // no data within 1 s; keep last published values
-    }
-    if (!analogContinuousRead(&result, 0) || result == nullptr) continue;
+  analogReadResolution(12);  // 0..4095
+  for (int i = 0; i < NCH; ++i) {
+    analogSetPinAttenuation(ADC_PINS[i], ADC_11db);  // full 0-3.3 V stick swing
+  }
 
+  const TickType_t period = pdMS_TO_TICKS(1);  // ~1 kHz (4 oneshot reads per loop)
+  for (;;) {
     int16_t out[NCH];
     bool all = true;
     for (int i = 0; i < NCH; ++i) {
-      int idx = pinToIndex(result[i].pin);
-      if (idx < 0) continue;
-      int16_t med = g_median[idx].push((int16_t)result[i].avg_read_raw);
-      if (!g_have_ema[idx]) {
-        g_ema[idx] = med;
-        g_have_ema[idx] = true;
+      int16_t raw = (int16_t)analogRead(ADC_PINS[i]);
+      int16_t med = g_median[i].push(raw);
+      if (!g_have_ema[i]) {
+        g_ema[i] = med;
+        g_have_ema[i] = true;
       } else {
-        g_ema[idx] += EMA_ALPHA * (med - g_ema[idx]);
+        g_ema[i] += EMA_ALPHA * (med - g_ema[i]);
       }
-    }
-    for (int i = 0; i < NCH; ++i) {
       out[i] = (int16_t)(g_ema[i] + 0.5f);
       if (!g_have_ema[i]) all = false;
     }
     publish(out, all);
+    vTaskDelay(period);
   }
 }
 
 }  // namespace
 
 bool gimbals_start() {
-  analogContinuousSetAtten(ADC_11db);  // full 0-3.3 V stick swing
-  if (!analogContinuous(ADC_PINS, NCH, CONVERSIONS_PER_PIN, SAMPLE_FREQ_HZ, adcCallback)) {
-    Serial.println("[gimbals] analogContinuous() setup FAILED");
-    return false;
-  }
-
   BaseType_t ok = xTaskCreatePinnedToCore(gimbalsTask, "gimbal", 4096, nullptr,
                                           /*priority=*/10, &g_task, /*core=*/1);
   if (ok != pdPASS) {
     Serial.println("[gimbals] task create FAILED");
     return false;
   }
-
-  analogContinuousStart();
-  Serial.println("[gimbals] analogContinuous started (4ch, 11dB, DMA)");
+  Serial.println("[gimbals] oneshot polling started (4ch, 11dB, ~1 kHz)");
   return true;
 }
 
@@ -135,6 +111,12 @@ bool gimbals_get(GimbalState& out) {
   return out.valid;
 }
 
-void gimbals_pause() { analogContinuousStop(); }
+// Suspend/resume the polling task. Wrap NVS/flash writes with these so no task is
+// executing flash-cached ADC code while the cache is disabled on the other core.
+void gimbals_pause() {
+  if (g_task) vTaskSuspend(g_task);
+}
 
-void gimbals_resume() { analogContinuousStart(); }
+void gimbals_resume() {
+  if (g_task) vTaskResume(g_task);
+}

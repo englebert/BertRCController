@@ -18,7 +18,7 @@ static constexpr int PIN_TFT_BL = 27;    // LEDC PWM backlight (ADC2 pin, output
 static constexpr int PIN_I2C_SDA = 21;
 static constexpr int PIN_I2C_SCL = 22;
 
-// ---- Gimbals (ADC1, analogContinuous) ----
+// ---- Gimbals (ADC1, oneshot analogRead polling) ----
 // Final arrangement, all four verified tracking on hardware (2026-07). GPIO32 is a
 // dead ADC input on this board — do not use. GPIO39 is the remaining spare.
 // GPIO36 erratum 3.11 glitch is mitigated by continuous mode keeping the ADC powered.

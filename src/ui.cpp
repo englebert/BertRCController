@@ -197,7 +197,7 @@ void calibrationWizard() {
     g_cal.mid[i] = (uint16_t)((mn[i] + mx[i]) / 2);  // center from the endpoints
   }
   g_cal.valid = true;
-  bool saved = safeSaveCal(g_cal);
+  bool saved = safeSaveCal(g_cal);  // quiesces gimbal + CRSF tasks around the NVS write
   Serial.printf("[cal] %s  T=%u..%u/%u  Y=%u..%u/%u  P=%u..%u/%u  R=%u..%u/%u\n",
                 saved ? "saved" : "SAVE FAILED",
                 mn[0], mx[0], g_cal.mid[0], mn[1], mx[1], g_cal.mid[1], mn[2], mx[2],

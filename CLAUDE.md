@@ -118,8 +118,11 @@ Lib: `Adafruit_MCP23X17`.
 - 3.3V native logic, direct connection.
 
 ## ADC (gimbals)
-- Driver: **`analogContinuous()`** — DMA scan mode, ADC1 only. No CPU cost per sample.
-- Channels 32, 33, 34, 35. Sample rate `4 ch × 1000 Hz`.
+- Driver: **oneshot `analogRead()` polling** at ~1 kHz. `analogContinuous()` (DMA scan)
+  was tried first but **misbehaves with >3 channels on this board** — individual channels
+  read stuck/ghosted (roll, then pitch). Oneshot polling reads each pin cleanly; the
+  filter and CRSF rates are unaffected. Do not reintroduce continuous mode here.
+- Pins **34, 36, 33, 35** (throttle, yaw, pitch, roll). Task loops all four per tick.
 - Attenuation **11 dB** (full 0–3.3V pot swing). Run `esp_adc_cal` to linearize.
 - Startup calibration: capture per-stick min/max endpoints (standard RC practice) —
   this also trims the ADC's dead zones near the rails.
@@ -149,14 +152,12 @@ Pipeline: **oversample → median-of-11 → light EMA**
 
 | Task | Core | Priority | Behavior |
 |------|------|----------|----------|
-| Gimbal sampling | 1 | highest | blocks on task notification from ADC ISR |
+| Gimbal sampling | 1 | highest | polls 4x analogRead() per ~1ms tick, filters, publishes |
 | CRSF / ELRS | 0 | medium | TX 250–500 Hz, independent of sample rate |
 | Display / UI | 0 | low | redraws at ~10–30 Hz |
 
-- ADC conversion-done callback: `vTaskNotifyGiveFromISR()` **only**. No reads, no
-  `printf`, nothing blocking inside the ISR.
-- Gimbal task: `ulTaskNotifyTake(pdTRUE, portMAX_DELAY)` → `analogContinuousRead()` →
-  demux by `result.pin` → filter → publish to shared struct.
+- Gimbal task: poll `analogRead()` for each of the 4 pins per tick → median+EMA filter
+  → publish to shared struct. (No ADC ISR — continuous/DMA mode was dropped, see ADC.)
 - Shared gimbal struct (4× `int16_t`): guard writes and reads with `portENTER_CRITICAL`
   or a mutex so CRSF never transmits a half-updated channel set.
 - Rates are decoupled: CRSF reads the latest filtered values whenever it builds a frame.
