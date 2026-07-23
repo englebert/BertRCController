@@ -24,12 +24,14 @@ bool storage_init() {
 bool storage_load_cal(GimbalCal& out) {
   out.valid = false;
   if (!g_open) return false;
-  // Stored as a fixed blob of the 8 endpoint values (validity = key presence).
-  uint16_t buf[8];
+  // Fixed blob: min[4], max[4], mid[4] (validity = key presence + exact size, so an
+  // old 8-value blob from a previous layout reads as "not calibrated").
+  uint16_t buf[12];
   if (prefs.getBytes(KEY_CAL, buf, sizeof(buf)) != sizeof(buf)) return false;
   for (int i = 0; i < 4; ++i) {
     out.min[i] = buf[i];
     out.max[i] = buf[4 + i];
+    out.mid[i] = buf[8 + i];
   }
   out.valid = true;
   return true;
@@ -37,10 +39,11 @@ bool storage_load_cal(GimbalCal& out) {
 
 bool storage_save_cal(const GimbalCal& cal) {
   if (!g_open) return false;
-  uint16_t buf[8];
+  uint16_t buf[12];
   for (int i = 0; i < 4; ++i) {
     buf[i] = cal.min[i];
     buf[4 + i] = cal.max[i];
+    buf[8 + i] = cal.mid[i];
   }
   return prefs.putBytes(KEY_CAL, buf, sizeof(buf)) == sizeof(buf);
 }

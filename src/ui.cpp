@@ -30,6 +30,8 @@ constexpr float THROTTLE_GATE_PCT = 15.0f;
 
 // Toggle6 = mode switch (B2 = MCP bit 10). ON (closed) = configuration mode.
 constexpr int TOGGLE6_BIT = 10;
+// Toggle5 (B1 = MCP bit 9) ON at power-up = force the gimbal calibration wizard.
+constexpr int TOGGLE5_BIT = 9;
 
 // Menu-key thresholds (TASK01.md), on the RC microsecond scale 1000..2000 (center
 // 1500) derived from calibrated stick percent. Pitch: >1800 = UP, <1200 = DOWN.
@@ -39,17 +41,33 @@ constexpr int KEY_LO_US = 1200;
 
 GimbalCal g_cal = {};
 
+// NVS write with the interrupt-heavy peripherals quiesced (see crash note in appTask).
+bool safeSaveCal(const GimbalCal& cal) {
+  crsf_pause();
+  gimbals_pause();
+  bool ok = storage_save_cal(cal);
+  gimbals_resume();
+  crsf_resume();
+  return ok;
+}
+
 void backlightOn() {
   ledcAttach(PIN_TFT_BL, BL_PWM_FREQ, BL_PWM_BITS);  // arduino-esp32 3.x API
   ledcWrite(PIN_TFT_BL, BL_FULL);
 }
 
 // ---- Calibrated stick helpers (index: 0=T, 1=Y, 2=P, 3=R) ----
+// Piecewise around the stored center: min..mid -> 0..50%, mid..max -> 50..100%.
+// Keeps a resting stick at exactly 50% (1500 us) even with asymmetric pot travel.
 float calPct(int idx, int raw) {
   if (!g_cal.valid || g_cal.max[idx] <= g_cal.min[idx]) {
     return constrain(raw, 0, 4095) * 100.0f / 4095.0f;  // uncalibrated fallback
   }
-  float p = (raw - (int)g_cal.min[idx]) * 100.0f / (g_cal.max[idx] - g_cal.min[idx]);
+  int lo = g_cal.min[idx], hi = g_cal.max[idx], mid = g_cal.mid[idx];
+  if (mid <= lo || mid >= hi) mid = (lo + hi) / 2;  // sane fallback
+  float p;
+  if (raw <= mid) p = (raw - lo) * 50.0f / (mid - lo);
+  else p = 50.0f + (raw - mid) * 50.0f / (hi - mid);
   return constrain(p, 0.0f, 100.0f);
 }
 
@@ -116,7 +134,7 @@ void calibrationWizard() {
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("CALIBRATE: sweep sticks to all corners", LCD_W / 2, 8, 1);
+  tft.drawString("CALIBRATE: circle sticks around corners", LCD_W / 2, 8, 1);
 
   uint16_t mn[4] = {4095, 4095, 4095, 4095};
   uint16_t mx[4] = {0, 0, 0, 0};
@@ -176,11 +194,14 @@ void calibrationWizard() {
   for (int i = 0; i < 4; ++i) {
     g_cal.min[i] = mn[i];
     g_cal.max[i] = mx[i];
+    g_cal.mid[i] = (uint16_t)((mn[i] + mx[i]) / 2);  // center from the endpoints
   }
   g_cal.valid = true;
-  storage_save_cal(g_cal);
-  Serial.printf("[cal] saved  T=%u..%u Y=%u..%u P=%u..%u R=%u..%u\n", mn[0], mx[0], mn[1],
-                mx[1], mn[2], mx[2], mn[3], mx[3]);
+  bool saved = safeSaveCal(g_cal);
+  Serial.printf("[cal] %s  T=%u..%u/%u  Y=%u..%u/%u  P=%u..%u/%u  R=%u..%u/%u\n",
+                saved ? "saved" : "SAVE FAILED",
+                mn[0], mx[0], g_cal.mid[0], mn[1], mx[1], g_cal.mid[1], mn[2], mx[2],
+                g_cal.mid[2], mn[3], mx[3], g_cal.mid[3]);
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
@@ -345,11 +366,11 @@ void renderConfig() {
   }
 }
 
-// ---- Live mode loop: Toggle6 ON = Config, OFF = RC ----
-bool toggle6On() {
+// ---- Toggle helpers ----
+bool toggleOn(int bit) {
   SwitchState sw;
-  if (!switches_get(sw)) return false;  // sensor missing -> default to RC mode
-  return sw.bits & (1u << TOGGLE6_BIT);
+  if (!switches_get(sw)) return false;  // sensor missing -> treat as OFF
+  return sw.bits & (1u << bit);
 }
 
 void modeLoop() {
@@ -358,7 +379,7 @@ void modeLoop() {
   const TickType_t period = pdMS_TO_TICKS(50);  // ~20 Hz
 
   for (;;) {
-    Screen want = toggle6On() ? Screen::Config : Screen::Rc;
+    Screen want = toggleOn(TOGGLE6_BIT) ? Screen::Config : Screen::Rc;
     if (want != cur) {
       cur = want;
       if (cur == Screen::Config) drawConfigStatic();
@@ -371,6 +392,10 @@ void modeLoop() {
 }
 
 void appTask(void*) {
+  // NVS first, while no peripheral tasks/ISRs exist yet — flash init may write, and a
+  // busy ISR during a flash-cache-disabled window panics the chip.
+  storage_init();
+
   tft.init();
   tft.setRotation(PANEL_ROTATION);
   if (PANEL_INVERT) tft.invertDisplay(true);
@@ -386,9 +411,11 @@ void appTask(void*) {
 
   runInit();  // INA226 -> MCP23017 -> Gimbals -> CRSF, with per-module status
 
-  storage_init();
-  if (!storage_load_cal(g_cal)) {
-    calibrationWizard();  // first boot: capture stick endpoints into NVS
+  // Toggle5 ON at power-up forces a fresh calibration; otherwise use the stored one.
+  // First boot (nothing stored) always calibrates.
+  bool have_cal = storage_load_cal(g_cal);
+  if (toggleOn(TOGGLE5_BIT) || !have_cal) {
+    calibrationWizard();
   } else {
     Serial.println("[cal] loaded from NVS");
   }

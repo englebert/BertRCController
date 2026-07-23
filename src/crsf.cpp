@@ -26,6 +26,7 @@ constexpr uint16_t CRSF_MID = 992;
 constexpr uint16_t CRSF_MAX = 1811;
 
 HardwareSerial& uart = Serial2;
+TaskHandle_t g_task = nullptr;
 
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 CrsfLink g_link = {false, 0, 0, 0, 0, 0};
@@ -186,7 +187,7 @@ bool crsf_start() {
   uart.setTimeout(0);
 
   BaseType_t ok = xTaskCreatePinnedToCore(crsfTask, "crsf", 4096, nullptr,
-                                          /*priority=*/3, nullptr, /*core=*/0);
+                                          /*priority=*/3, &g_task, /*core=*/0);
   if (ok != pdPASS) {
     Serial.println("[crsf] task create FAILED");
     return false;
@@ -206,4 +207,14 @@ void crsf_get_channels(uint16_t out[16]) {
   portENTER_CRITICAL(&g_mux);
   memcpy(out, g_channels, sizeof(g_channels));
   portEXIT_CRITICAL(&g_mux);
+}
+
+void crsf_pause() {
+  if (g_task) vTaskSuspend(g_task);
+  uart.flush();                    // let in-flight TX finish
+  vTaskDelay(pdMS_TO_TICKS(10));   // and the echo/telemetry burst drain
+}
+
+void crsf_resume() {
+  if (g_task) vTaskResume(g_task);
 }

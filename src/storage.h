@@ -7,11 +7,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Per-stick raw ADC endpoints, captured by the calibration wizard.
+// Per-stick raw ADC endpoints + center, captured by the calibration wizard
+// (min/max from circling the corners; center derived as (min+max)/2).
 // Index order matches GimbalState: 0=Throttle, 1=Yaw, 2=Pitch, 3=Roll.
 struct GimbalCal {
   uint16_t min[4];
   uint16_t max[4];
+  uint16_t mid[4];
   bool valid;
 };
 

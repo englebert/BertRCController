@@ -134,3 +134,7 @@ bool gimbals_get(GimbalState& out) {
   portEXIT_CRITICAL(&g_mux);
   return out.valid;
 }
+
+void gimbals_pause() { analogContinuousStop(); }
+
+void gimbals_resume() { analogContinuousStart(); }

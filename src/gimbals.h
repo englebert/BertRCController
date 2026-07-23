@@ -21,3 +21,8 @@ bool gimbals_start();
 
 // Copy the latest filtered state into `out`. Returns out.valid. Safe from any task.
 bool gimbals_get(GimbalState& out);
+
+// Pause/resume the continuous-ADC DMA (and its ISR). Wrap NVS/flash writes with
+// these — the ADC interrupt firing during a flash-cache-disabled window panics.
+void gimbals_pause();
+void gimbals_resume();

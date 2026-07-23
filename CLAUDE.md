@@ -207,6 +207,16 @@ Toggles are 2-position (172/1811); the toggle→MCP-pin map is `TOGGLE_BIT[]`.
 
 MCP bit numbering: A0–A7 = bits 0–7, B0–B7 = bits 8–15.
 
+Special toggles (read directly by the app/UI task, in addition to their channels):
+- **Toggle5 (B1)** ON at power-up → force the gimbal calibration wizard (circle sticks,
+  min/max captured, center = (min+max)/2, stored in NVS).
+- **Toggle6 (B2)** live mode switch: ON = configuration mode (pitch = UP/DOWN keys,
+  roll = OK/CANCEL, thresholds 1800/1200 on the 1000–2000 µs scale), OFF = RC screen.
+
+NVS/flash writes MUST be wrapped with gimbals_pause()/crsf_pause() (see safeSaveCal in
+ui.cpp) — a busy ADC-DMA/UART ISR during a flash-cache-disabled window panics the chip
+("Cache disabled but cached memory region accessed").
+
 ## Open — ask before assuming
 1. ~~Display resolution + x/y offset~~ — **RESOLVED**: 76x284, rot 1, offsets in `display_cfg.h`.
 2. ~~CRSF channel order + mapping~~ — **RESOLVED**: AETR (CH1=Roll, CH2=Pitch, CH3=Throttle,
