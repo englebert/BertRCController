@@ -1,0 +1,10 @@
+# PlatformIO build output & caches
+.pio/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
