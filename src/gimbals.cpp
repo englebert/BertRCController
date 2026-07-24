@@ -17,22 +17,28 @@ const uint8_t ADC_PINS[] = {PIN_GIMBAL_THROTTLE, PIN_GIMBAL_YAW, PIN_GIMBAL_PITC
                             PIN_GIMBAL_ROLL};
 constexpr int NCH = 4;
 
-constexpr float EMA_ALPHA = 0.2f;  // light smoothing after the median
+// Noise handling: oversample -> median-of-N (spike reject) -> EMA -> hysteresis deadband.
+constexpr int OVERSAMPLE = 8;      // raw reads averaged per sample (~sqrt reduction)
+constexpr int MED_N = 21;          // median window (spike rejection)
+constexpr float EMA_ALPHA = 0.12f;  // EMA smoothing after the median (lower = smoother)
+// Deadband: hold the output steady until it moves more than this many counts. Kills
+// at-rest jitter with no lag on real movement (~DEADBAND/4095 = 0.24% dead to micro-moves).
+constexpr int DEADBAND = 35;
 
-// --- Median-of-11: ring buffer kept in TIME order; sort a COPY, never the ring.
-struct Median11 {
-  int16_t ring[11] = {0};
+// --- Median-of-N: ring buffer kept in TIME order; sort a COPY, never the ring.
+struct MedianFilter {
+  int16_t ring[MED_N] = {0};
   int widx = 0;   // next write position (time order preserved)
   int count = 0;  // valid samples so far
 
   int16_t push(int16_t v) {
     ring[widx] = v;
-    widx = (widx + 1) % 11;
-    if (count < 11) count++;
+    widx = (widx + 1) % MED_N;
+    if (count < MED_N) count++;
 
-    int16_t tmp[11];
+    int16_t tmp[MED_N];
     for (int i = 0; i < count; ++i) tmp[i] = ring[i];  // copy, then sort the copy
-    for (int i = 1; i < count; ++i) {                  // insertion sort (n<=11)
+    for (int i = 1; i < count; ++i) {                  // insertion sort (small n)
       int16_t key = tmp[i];
       int j = i - 1;
       while (j >= 0 && tmp[j] > key) {
@@ -45,9 +51,11 @@ struct Median11 {
   }
 };
 
-Median11 g_median[NCH];
+MedianFilter g_median[NCH];
 float g_ema[NCH] = {0, 0, 0, 0};
 bool g_have_ema[NCH] = {false, false, false, false};
+int16_t g_hold[NCH] = {0, 0, 0, 0};  // deadband-held output
+bool g_hold_init[NCH] = {false, false, false, false};
 
 TaskHandle_t g_task = nullptr;
 
@@ -70,12 +78,14 @@ void gimbalsTask(void*) {
     analogSetPinAttenuation(ADC_PINS[i], ADC_11db);  // full 0-3.3 V stick swing
   }
 
-  const TickType_t period = pdMS_TO_TICKS(1);  // ~1 kHz (4 oneshot reads per loop)
+  const TickType_t period = pdMS_TO_TICKS(1);  // ~500 Hz-1 kHz incl. read time
   for (;;) {
     int16_t out[NCH];
     bool all = true;
     for (int i = 0; i < NCH; ++i) {
-      int16_t raw = (int16_t)analogRead(ADC_PINS[i]);
+      int32_t acc = 0;  // oversample: average OVERSAMPLE raw reads
+      for (int s = 0; s < OVERSAMPLE; ++s) acc += analogRead(ADC_PINS[i]);
+      int16_t raw = (int16_t)(acc / OVERSAMPLE);
       int16_t med = g_median[i].push(raw);
       if (!g_have_ema[i]) {
         g_ema[i] = med;
@@ -83,7 +93,13 @@ void gimbalsTask(void*) {
       } else {
         g_ema[i] += EMA_ALPHA * (med - g_ema[i]);
       }
-      out[i] = (int16_t)(g_ema[i] + 0.5f);
+      // Hysteresis deadband: only move the output when it changes enough.
+      int16_t ev = (int16_t)(g_ema[i] + 0.5f);
+      if (!g_hold_init[i] || abs(ev - g_hold[i]) > DEADBAND) {
+        g_hold[i] = ev;
+        g_hold_init[i] = true;
+      }
+      out[i] = g_hold[i];
       if (!g_have_ema[i]) all = false;
     }
     publish(out, all);
