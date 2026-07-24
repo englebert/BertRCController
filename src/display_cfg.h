@@ -36,8 +36,9 @@ static constexpr int LCD_H = PANEL_LANDSCAPE ? PANEL_NAT_W : PANEL_NAT_H;  // 76
 static constexpr int VP_X = PANEL_LANDSCAPE ? PANEL_ROW_OFFSET : PANEL_COL_OFFSET;  // 18 : 82
 static constexpr int VP_Y = PANEL_LANDSCAPE ? PANEL_COL_OFFSET : PANEL_ROW_OFFSET;  // 82 : 18
 
-// Set to true if colors look photo-negative (many ST7789 IPS panels need this).
-static constexpr bool PANEL_INVERT = true;
+// Panel inversion. false = black renders black on this panel (verified). Flip to true
+// only if colors come out photo-negative.
+static constexpr bool PANEL_INVERT = false;
 
 // ---- Backlight PWM (LEDC): ~5 kHz, 8-bit, 0..255 ----
 static constexpr int BL_PWM_FREQ = 5000;

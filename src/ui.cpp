@@ -21,6 +21,11 @@ namespace {
 
 TFT_eSPI tft;  // pins come from build_flags (platformio.ini)
 
+// ---- Theme (TASK01.md: black background throughout) ----
+// Single source of truth for the screen background. All screen clears and text
+// backgrounds use this so the theme can be changed in one place.
+constexpr uint16_t COL_BG = TFT_BLACK;
+
 // Battery % mapping (2S): 6.0 V = 0%, 8.4 V = 100%.
 constexpr float VBAT_MIN = 6.0f;
 constexpr float VBAT_MAX = 8.4f;
@@ -75,7 +80,7 @@ int calUs(int idx, int raw) { return 1000 + (int)(calPct(idx, raw) * 10.0f + 0.5
 
 // ---- Boot screen ----
 void bootScreen() {
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(COL_BG);
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -87,7 +92,7 @@ const char* const MOD_NAME[4] = {"INA226", "MCP23017", "Gimbals", "CRSF"};
 int rowY(int i) { return 9 + i * 17; }  // 4 rows in 76 px
 
 void drawInitList() {
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(COL_BG);
   for (int i = 0; i < 4; ++i) {
     tft.setTextPadding(0);
     tft.setTextDatum(ML_DATUM);
@@ -132,7 +137,7 @@ void calibrationWizard() {
   const char* const NAME[4] = {"THR", "YAW", "PIT", "ROL"};
   enum Zone : uint8_t { UNK, LO, HI };
 
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(COL_BG);
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -214,7 +219,7 @@ void calibrationWizard() {
                 saved ? "saved" : "SAVE FAILED",
                 mn[0], mx[0], g_cal.mid[0], mn[1], mx[1], g_cal.mid[1], mn[2], mx[2],
                 g_cal.mid[2], mn[3], mx[3], g_cal.mid[3]);
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(COL_BG);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.drawString("SAVED", LCD_W / 2, LCD_H / 2, 4);
@@ -223,7 +228,7 @@ void calibrationWizard() {
 
 // ---- Throttle-safety gate ----
 void drawThrottleWarning() {
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(COL_BG);
   // Warning triangle, left side.
   const int cx = 34, cy = LCD_H / 2;
   tft.fillTriangle(cx, cy - 24, cx - 26, cy + 22, cx + 26, cy + 22, TFT_YELLOW);
@@ -266,7 +271,7 @@ int batteryPct(float v) {
 }
 
 void drawRcStatic() {
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(COL_BG);
   tft.setTextDatum(ML_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
@@ -312,7 +317,7 @@ Keys readKeys() {
 }
 
 void drawConfigStatic() {
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(COL_BG);
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
@@ -348,7 +353,7 @@ void renderConfig() {
   constexpr int BX = 34;                           // after label
   constexpr int VW = 34;                           // raw value width
   constexpr int BW = LCD_W - BX - VW;              // bar width
-  tft.fillScreen(TFT_BLACK);
+  tft.fillScreen(COL_BG);
 
   char b[8];
   for (;;) {
@@ -410,8 +415,8 @@ void appTask(void*) {
 
   tft.init();
   tft.setRotation(PANEL_ROTATION);
-  if (PANEL_INVERT) tft.invertDisplay(true);
-  tft.fillScreen(TFT_BLACK);
+  tft.invertDisplay(PANEL_INVERT);  // explicit: false actively disables inversion
+  tft.fillScreen(COL_BG);
   tft.setViewport(VP_X, VP_Y, LCD_W, LCD_H);
   backlightOn();
 
