@@ -29,6 +29,11 @@ bool storage_save_cal(const GimbalCal& cal);
 bool storage_load_flip(bool out[4]);
 bool storage_save_flip(const bool in[4]);
 
+// Toggle -> CRSF channel map. Index 0=Toggle1..9=Toggle10; value = channel 5..16
+// (0 = unassigned). load returns false (leaving defaults) when nothing is stored.
+bool storage_load_toggles(uint8_t out[10]);
+bool storage_save_toggles(const uint8_t in[10]);
+
 // Total accumulated flight time (persisted). Used by Phase 2.
 uint32_t storage_get_total_flight_secs();
 void storage_add_flight_secs(uint32_t secs);

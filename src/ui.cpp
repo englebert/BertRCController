@@ -57,7 +57,7 @@ bool safeSaveCal(const GimbalCal& cal) {
   return ok;
 }
 
-bool safeSaveFlip() {
+bool safeSaveGconfig() {  // persists flip + toggle map
   crsf_pause();
   gimbals_pause();
   bool ok = gconfig_save();
@@ -584,12 +584,56 @@ void drawBatteryDynamic(bool force) {
   }
 }
 
+// --- Menu item 2: Toggle -> CRSF channel mapping (Toggle6 reserved for menu mode).
+const int EDIT_TOGGLE[9] = {0, 1, 2, 3, 4, 6, 7, 8, 9};  // toggle indices, skip Toggle6
+constexpr int EDIT_TOGGLE_N = 9;
+
+void drawToggleMap(int cursor, bool editing) {
+  tft.fillScreen(COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("TOGGLES", 4, 5, 1);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  tft.drawString(editing ? "UP/DN:chan  OK:set" : "OK:edit  CXL:back", LCD_W - 4, 5, 1);
+
+  int cur_toggle = EDIT_TOGGLE[cursor];
+  char b[16];
+  for (int t = 0; t < 10; ++t) {  // 2 columns x 5 rows
+    int col = t < 5 ? 0 : 1;
+    int row = t < 5 ? t : t - 5;
+    int x = col ? 152 : 8;
+    int y = 17 + row * 12;
+    bool sel = (t == cur_toggle);
+    if (t == 5) {
+      snprintf(b, sizeof(b), "T6  MENU");
+    } else {
+      uint8_t c = gconfig_toggle_chan(t);
+      if (c) snprintf(b, sizeof(b), "T%-2d CH%u", t + 1, c);
+      else snprintf(b, sizeof(b), "T%-2d --", t + 1);
+    }
+    uint16_t bg = COL_BG, fg = (t == 5) ? TFT_DARKGREY : TFT_WHITE;
+    if (sel) {
+      bg = TFT_NAVY;
+      fg = editing ? TFT_GREEN : TFT_YELLOW;  // green while editing the channel
+      tft.fillRect(col ? 148 : 2, y - 6, 134, 12, bg);
+    }
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(fg, bg);
+    tft.drawString(b, x, y, 1);
+  }
+}
+
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
 void configLoop() {
   enum class Page : uint8_t { List, Gimbals, Toggles, Battery, Crsf, Reboot };
   Page page = Page::List;
   int sel = 0;
-  int gcursor = 0;  // selected channel on the Gimbals page
+  int gcursor = 0;   // selected channel on the Gimbals page
+  int tmcursor = 0;  // selected toggle on the Toggle Mapping page
+  bool tm_editing = false;
+  uint8_t tm_prevchan = 0;  // channel before entering edit (for CANCEL revert)
   bool redraw = true;
   EdgeKey ku, kd, kok, kcx;
   const TickType_t period = pdMS_TO_TICKS(50);
@@ -623,7 +667,7 @@ void configLoop() {
           if (dn && gcursor < 3) gcursor++;
           if (ok) {  // flip the selected channel and persist
             gconfig_set_flip(gcursor, !gconfig_flip(gcursor));
-            safeSaveFlip();
+            safeSaveGconfig();
           }
           if (cx) {
             page = Page::List;
@@ -632,6 +676,49 @@ void configLoop() {
           }
         }
         drawGimbalPage(gcursor, edit);
+        break;
+      }
+      case Page::Toggles: {
+        if (redraw) {
+          drawToggleMap(tmcursor, tm_editing);
+          redraw = false;
+        }
+        int t = EDIT_TOGGLE[tmcursor];
+        if (!tm_editing) {
+          // Selection mode: move cursor, OK enters edit, CANCEL backs out.
+          if (up && tmcursor > 0) drawToggleMap(--tmcursor, false);
+          if (dn && tmcursor < EDIT_TOGGLE_N - 1) drawToggleMap(++tmcursor, false);
+          if (ok) {
+            tm_editing = true;
+            tm_prevchan = gconfig_toggle_chan(t);
+            drawToggleMap(tmcursor, true);
+          }
+          if (cx) {
+            page = Page::List;
+            redraw = true;
+          }
+        } else {
+          // Edit mode: up/down cycle channel, OK accepts (+save), CANCEL reverts.
+          uint8_t c = gconfig_toggle_chan(t);
+          if (up) {  // none -> 5..16 -> none
+            gconfig_set_toggle_chan(t, (c == 0) ? 5 : (c >= 16 ? 0 : c + 1));
+            drawToggleMap(tmcursor, true);
+          }
+          if (dn) {  // none -> 16..5 -> none
+            gconfig_set_toggle_chan(t, (c == 0) ? 16 : (c <= 5 ? 0 : c - 1));
+            drawToggleMap(tmcursor, true);
+          }
+          if (ok) {
+            safeSaveGconfig();
+            tm_editing = false;
+            drawToggleMap(tmcursor, false);
+          }
+          if (cx) {
+            gconfig_set_toggle_chan(t, tm_prevchan);  // revert
+            tm_editing = false;
+            drawToggleMap(tmcursor, false);
+          }
+        }
         break;
       }
       case Page::Battery: {
@@ -658,7 +745,7 @@ void configLoop() {
           redraw = true;
         }
         break;
-      default:  // Toggles / Crsf stubs
+      default:  // Crsf stub
         if (redraw) {
           drawStub(MENU_ITEMS[(int)page - 1]);
           redraw = false;

@@ -93,12 +93,15 @@ void buildChannels(uint16_t ch[16]) {
   ch[1] = adcToCrsf(g.pitch, 2);
   ch[2] = adcToCrsf(g.throttle, 0);
   ch[3] = adcToCrsf(g.yaw, 1);
-  // CH5..CH14 = the 10 toggles, per TOGGLE_BIT map.
+
+  // CH5..CH16 default to center, then each toggle drives its assigned channel
+  // (configurable in the Toggle Mapping menu; Toggle6 is reserved for menu mode).
+  for (int c = 4; c < 16; ++c) ch[c] = CRSF_MID;
   for (int i = 0; i < 10; ++i) {
-    ch[4 + i] = (sw.bits & (1u << TOGGLE_BIT[i])) ? CRSF_MAX : CRSF_MIN;
+    uint8_t chan = gconfig_toggle_chan(i);  // 5..16, 0 = unassigned (incl. Toggle6)
+    if (chan < 5 || chan > 16) continue;
+    ch[chan - 1] = (sw.bits & (1u << TOGGLE_BIT[i])) ? CRSF_MAX : CRSF_MIN;
   }
-  ch[14] = CRSF_MID;
-  ch[15] = CRSF_MID;
 }
 
 void sendRcFrame() {

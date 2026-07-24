@@ -12,6 +12,7 @@ bool g_open = false;
 constexpr const char* NS = "bertrc";
 constexpr const char* KEY_CAL = "gcal";
 constexpr const char* KEY_FLIP = "gflip";
+constexpr const char* KEY_TMAP = "tmap";
 constexpr const char* KEY_TOTAL_FLIGHT = "tflight";
 
 }  // namespace
@@ -62,6 +63,16 @@ bool storage_save_flip(const bool in[4]) {
   uint8_t buf[4];
   for (int i = 0; i < 4; ++i) buf[i] = in[i] ? 1 : 0;
   return prefs.putBytes(KEY_FLIP, buf, sizeof(buf)) == sizeof(buf);
+}
+
+bool storage_load_toggles(uint8_t out[10]) {
+  if (!g_open) return false;
+  return prefs.getBytes(KEY_TMAP, out, 10) == 10;
+}
+
+bool storage_save_toggles(const uint8_t in[10]) {
+  if (!g_open) return false;
+  return prefs.putBytes(KEY_TMAP, in, 10) == 10;
 }
 
 uint32_t storage_get_total_flight_secs() {
