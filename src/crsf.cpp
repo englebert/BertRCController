@@ -137,8 +137,8 @@ void handleFrame(uint8_t type, const uint8_t* payload, int plen) {
   portENTER_CRITICAL(&g_mux);
   g_link.rx_frames++;
   if (type == TYPE_LINK_STATISTICS && plen >= 10) {
-    g_link.up_rssi = -(int16_t)payload[0];  // dBm
-    g_link.up_lq = payload[2];
+    g_link.up_rssi = -(int16_t)payload[0];  // uplink RSSI (dBm)
+    g_link.up_lq = payload[2];              // uplink link quality (%)
     g_link.rf_mode = payload[5];
     g_link.valid = true;
   }
@@ -215,6 +215,7 @@ void crsf_get_channels(uint16_t out[16]) {
   memcpy(out, g_channels, sizeof(g_channels));
   portEXIT_CRITICAL(&g_mux);
 }
+
 
 void crsf_pause() {
   if (g_task) vTaskSuspend(g_task);

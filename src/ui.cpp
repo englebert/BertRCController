@@ -477,16 +477,6 @@ void drawGimbalPage(int cursor, bool edit) {
   }
 }
 
-void drawStub(const char* title) {
-  tft.fillScreen(COL_BG);
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextPadding(0);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString(title, LCD_W / 2, 24, 2);
-  tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("coming soon  -  CXL=back", LCD_W / 2, 50, 1);
-}
-
 void drawRebootConfirm() {
   tft.fillScreen(COL_BG);
   tft.setTextDatum(MC_DATUM);
@@ -632,6 +622,73 @@ void drawToggleMapFull(int cursor, bool editing) {
   for (int t = 0; t < 10; ++t) drawToggleCell(t, t == cur_toggle, editing);
 }
 
+// --- Menu item 4: CRSF module status (BetaFPV Nano TX V2).
+void drawCrsfStatic() {
+  tft.fillScreen(COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("CRSF MODULE", 4, 6, 1);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  tft.drawString("CXL=back", LCD_W - 4, 6, 1);
+  // Static labels.
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  tft.drawString("MODULE", 4, 20, 1);
+  tft.drawString("LINK", 4, 32, 1);
+  tft.drawString("LQ", 4, 44, 1);
+  tft.drawString("RSSI", 4, 56, 1);
+  tft.drawString("RATE", 4, 68, 1);
+  // Static value: our fixed link config.
+  tft.setTextColor(TFT_WHITE, COL_BG);
+  tft.drawString("250 Hz  400k", 70, 68, 1);
+}
+
+void drawCrsfVal(int y, const char* s, uint16_t col) {
+  tft.fillRect(66, y - 6, LCD_W - 66, 12, COL_BG);  // clear value area only
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextPadding(0);
+  tft.setTextColor(col, COL_BG);
+  tft.drawString(s, 70, y, 1);
+}
+
+void drawCrsfDynamic(bool force) {
+  static uint32_t prev_rx = 0;
+  static int last_online = -1, last_link = -1, last_lq = -999, last_rssi = -999;
+  CrsfLink l;
+  crsf_get(l);
+  char b[20];
+
+  // MODULE: is the TX module sending anything back (sync/telemetry frames)?
+  int online = (l.rx_frames != prev_rx) ? 1 : 0;
+  prev_rx = l.rx_frames;
+  if (force || online != last_online) {
+    last_online = online;
+    drawCrsfVal(20, online ? "ONLINE" : "OFFLINE", online ? TFT_GREEN : TFT_RED);
+  }
+  // LINK: RF link to a bound receiver (link-stats present with LQ > 0).
+  int link = (l.valid && l.up_lq > 0) ? 1 : 0;
+  if (force || link != last_link) {
+    last_link = link;
+    drawCrsfVal(32, link ? "UP" : "DOWN", link ? TFT_GREEN : TFT_DARKGREY);
+  }
+  int lq = l.valid ? l.up_lq : -1;
+  if (force || lq != last_lq) {
+    last_lq = lq;
+    if (lq < 0) snprintf(b, sizeof(b), "--");
+    else snprintf(b, sizeof(b), "%d %%", lq);
+    drawCrsfVal(44, b, TFT_WHITE);
+  }
+  int rssi = l.valid ? l.up_rssi : -999;
+  if (force || rssi != last_rssi) {
+    last_rssi = rssi;
+    if (rssi == -999) snprintf(b, sizeof(b), "--");
+    else snprintf(b, sizeof(b), "%d dBm", rssi);
+    drawCrsfVal(56, b, TFT_WHITE);
+  }
+}
+
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
 void configLoop() {
   enum class Page : uint8_t { List, Gimbals, Toggles, Battery, Crsf, Reboot };
@@ -769,11 +826,20 @@ void configLoop() {
           redraw = true;
         }
         break;
-      default:  // Crsf stub
+      case Page::Crsf: {
+        bool first = redraw;
         if (redraw) {
-          drawStub(MENU_ITEMS[(int)page - 1]);
+          drawCrsfStatic();
           redraw = false;
         }
+        drawCrsfDynamic(first);
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        break;
+      }
+      default:  // unreachable — all pages handled
         if (cx) {
           page = Page::List;
           redraw = true;
