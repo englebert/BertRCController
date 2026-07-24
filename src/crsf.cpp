@@ -11,7 +11,11 @@
 namespace {
 
 constexpr uint32_t CRSF_BAUD = 400000;
-constexpr int TX_RATE_HZ = 500;  // matches the module's F500 packet rate
+// 250 Hz, not 500: our vTaskDelayUntil runs on the 1 ms tick, so at a 2 ms (500 Hz)
+// period the ±1 ms jitter collides with the module's telemetry and drops the link
+// intermittently. 250 Hz (4 ms) has enough margin to be rock-solid. The module
+// still RF-transmits at its own rate, reusing the latest channels.
+constexpr int TX_RATE_HZ = 250;
 
 // CRSF addressing / frame types.
 constexpr uint8_t ADDR_MODULE = 0xEE;  // CRSF transmitter (our destination)
@@ -201,7 +205,7 @@ bool crsf_start() {
     Serial.println("[crsf] task create FAILED");
     return false;
   }
-  Serial.println("[crsf] UART2 up @ 400000 (AETR, 500 Hz, half-duplex)");
+  Serial.println("[crsf] UART2 up @ 400000 (AETR, 250 Hz, half-duplex)");
   return true;
 }
 
