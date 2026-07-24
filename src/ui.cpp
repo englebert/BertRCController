@@ -86,7 +86,13 @@ float calPct(int idx, int raw) {
   return constrain(p, 0.0f, 100.0f);
 }
 
-int calUs(int idx, int raw) { return 1000 + (int)(calPct(idx, raw) * 10.0f + 0.5f); }
+// Flip-aware stick position: applies the channel reverse flag so display, menu keys,
+// and CRSF output all agree on stick direction.
+float stickPct(int idx, int raw) {
+  float p = calPct(idx, raw);
+  return gconfig_flip(idx) ? (100.0f - p) : p;
+}
+int stickUs(int idx, int raw) { return 1000 + (int)(stickPct(idx, raw) * 10.0f + 0.5f); }
 
 // ---- Boot screen ----
 void bootScreen() {
@@ -323,8 +329,8 @@ struct RawKeys {
 RawKeys readRawKeys() {
   GimbalState g;
   gimbals_get(g);
-  int p = calUs(2, g.pitch);
-  int r = calUs(3, g.roll);
+  int p = stickUs(2, g.pitch);  // flip-aware: nav follows the pitch reverse flag
+  int r = stickUs(3, g.roll);   // flip-aware: OK/CANCEL follow the roll reverse flag
   return {p > KEY_HI_US, p < KEY_LO_US, r > KEY_HI_US, r < KEY_LO_US};
 }
 
@@ -393,8 +399,7 @@ void drawGimbalPage(int cursor, bool edit) {
   for (int i = 0; i < 4; ++i) {
     bool sel = edit && (i == cursor);
     bool fl = gconfig_flip(i);
-    float pct = calPct(i, raw[i]);
-    if (fl) pct = 100.0f - pct;  // show the reversed position
+    float pct = stickPct(i, raw[i]);  // flip-aware position
     int y = top + i * rowh, cy = y + rowh / 2;
     int fw = constrain((int)(pct * bw / 100.0f), 0, bw);
 
