@@ -11,7 +11,7 @@
 namespace {
 
 constexpr uint32_t CRSF_BAUD = 400000;
-constexpr int TX_RATE_HZ = 250;
+constexpr int TX_RATE_HZ = 500;  // matches the module's F500 packet rate
 
 // CRSF addressing / frame types.
 constexpr uint8_t ADDR_MODULE = 0xEE;  // CRSF transmitter (our destination)
@@ -173,7 +173,8 @@ void feed(uint8_t b) {
 }
 
 void crsfTask(void*) {
-  const TickType_t period = pdMS_TO_TICKS(1000 / TX_RATE_HZ);
+  const TickType_t period = pdMS_TO_TICKS(1000 / TX_RATE_HZ);  // 2 ms @ 500 Hz
+  TickType_t last = xTaskGetTickCount();
   for (;;) {
     sendRcFrame();
     portENTER_CRITICAL(&g_mux);
@@ -183,7 +184,8 @@ void crsfTask(void*) {
     // Drain everything the module (and our echo) put on the wire.
     while (uart.available()) feed((uint8_t)uart.read());
 
-    vTaskDelay(period);
+    // Fixed cadence (independent of TX/parse time) for a steady frame rate.
+    vTaskDelayUntil(&last, period);
   }
 }
 
@@ -199,7 +201,7 @@ bool crsf_start() {
     Serial.println("[crsf] task create FAILED");
     return false;
   }
-  Serial.println("[crsf] UART2 up @ 400000 (AETR, 250 Hz, half-duplex)");
+  Serial.println("[crsf] UART2 up @ 400000 (AETR, 500 Hz, half-duplex)");
   return true;
 }
 
