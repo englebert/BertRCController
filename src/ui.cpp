@@ -504,6 +504,86 @@ void doReboot() {
   ESP.restart();
 }
 
+// --- Menu item 3: Battery info (INA226) with a fill-level battery icon.
+uint16_t batteryColor(int pct) {
+  if (pct > 50) return TFT_GREEN;
+  if (pct > 20) return TFT_ORANGE;
+  return TFT_RED;
+}
+
+void drawBatteryIcon(int x, int y, int w, int h, int pct, uint16_t fill) {
+  tft.drawRoundRect(x, y, w, h, 3, TFT_WHITE);          // body
+  int nubh = h / 2;
+  tft.fillRect(x + w, y + (h - nubh) / 2, 5, nubh, TFT_WHITE);  // terminal
+  int ix = x + 3, iy = y + 3, iw = w - 6, ih = h - 6;  // inner
+  int fw = iw * constrain(pct, 0, 100) / 100;
+  tft.fillRect(ix, iy, fw, ih, fill);
+  tft.fillRect(ix + fw, iy, iw - fw, ih, COL_BG);
+}
+
+void drawBatteryStatic() {
+  tft.fillScreen(COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("BATTERY", 4, 6, 1);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  tft.drawString("CXL=back", LCD_W - 4, 6, 1);
+}
+
+// Redraw only what changed (force = redraw all, e.g. on page entry) to avoid the
+// erase/redraw flash — especially the % which sits transparently over the icon fill.
+void drawBatteryDynamic(bool force) {
+  static int last_pct = -999, last_v = -1, last_i = -2000000, last_p = -1;
+  PowerReading pr;
+  bool ok = power_get(pr);
+  int pct = ok ? batteryPct(pr.voltage_V) : -1;
+
+  const int bx = 8, by = 24, bw = 96, bh = 40;
+  const int rx = LCD_W - 4;
+  char b[16];
+
+  if (force || pct != last_pct) {  // icon fill + % only on change
+    last_pct = pct;
+    int p = pct < 0 ? 0 : pct;
+    drawBatteryIcon(bx, by, bw, bh, p, batteryColor(p));
+    snprintf(b, sizeof(b), ok ? "%d%%" : "--", p);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_WHITE);  // transparent over the freshly-drawn fill
+    tft.drawString(b, bx + bw / 2, by + bh / 2, 4);
+  }
+
+  int vi = ok ? (int)(pr.voltage_V * 100 + 0.5f) : -1;
+  int ii = ok ? (int)pr.current_mA : -2000000;
+  int pi = ok ? (int)(pr.power_mW / 10.0f + 0.5f) : -1;  // 0.01 W units
+
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextPadding(96);
+  if (force || vi != last_v) {
+    last_v = vi;
+    tft.setTextColor(TFT_WHITE, COL_BG);
+    if (ok) snprintf(b, sizeof(b), "%.2f V", pr.voltage_V);
+    else snprintf(b, sizeof(b), "-- V");
+    tft.drawString(b, rx, 24, 2);
+  }
+  if (force || ii != last_i) {
+    last_i = ii;
+    tft.setTextColor(ok && pr.near_full ? TFT_RED : TFT_CYAN, COL_BG);
+    if (!ok) snprintf(b, sizeof(b), "-- A");
+    else if (fabsf(pr.current_mA) >= 1000.0f) snprintf(b, sizeof(b), "%.2f A", pr.current_mA / 1000.0f);
+    else snprintf(b, sizeof(b), "%.0f mA", pr.current_mA);
+    tft.drawString(b, rx, 44, 2);
+  }
+  if (force || pi != last_p) {
+    last_p = pi;
+    tft.setTextColor(TFT_GREENYELLOW, COL_BG);
+    if (ok) snprintf(b, sizeof(b), "%.2f W", pr.power_mW / 1000.0f);
+    else snprintf(b, sizeof(b), "-- W");
+    tft.drawString(b, rx, 64, 2);
+  }
+}
+
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
 void configLoop() {
   enum class Page : uint8_t { List, Gimbals, Toggles, Battery, Crsf, Reboot };
@@ -554,6 +634,19 @@ void configLoop() {
         drawGimbalPage(gcursor, edit);
         break;
       }
+      case Page::Battery: {
+        bool first = redraw;  // full redraw on page entry
+        if (redraw) {
+          drawBatteryStatic();
+          redraw = false;
+        }
+        drawBatteryDynamic(first);
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        break;
+      }
       case Page::Reboot:
         if (redraw) {
           drawRebootConfirm();
@@ -565,7 +658,7 @@ void configLoop() {
           redraw = true;
         }
         break;
-      default:  // Toggles / Battery / Crsf stubs
+      default:  // Toggles / Crsf stubs
         if (redraw) {
           drawStub(MENU_ITEMS[(int)page - 1]);
           redraw = false;
