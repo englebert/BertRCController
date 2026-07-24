@@ -404,21 +404,24 @@ struct EdgeKey {
   }
 };
 
-void drawMenuList(int sel) {
+// Draw a single menu row (clears just its own area — no full-screen blank).
+void drawMenuItem(int i, bool sel) {
+  int y = 16 + i * 12;
+  uint16_t bg = sel ? TFT_NAVY : COL_BG;
+  tft.fillRect(0, y - 6, LCD_W, 12, bg);  // clear only this row
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextPadding(0);
+  tft.setTextColor(sel ? TFT_WHITE : TFT_DARKGREY, bg);
+  tft.drawString(MENU_ITEMS[i], 8, y, 1);
+}
+
+void drawMenuListFull(int sel) {
   tft.fillScreen(COL_BG);
   tft.setTextDatum(ML_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_YELLOW, COL_BG);
   tft.drawString("CONFIG", 4, 5, 1);
-  for (int i = 0; i < MENU_N; ++i) {  // font 1 so all items fit the 76 px height
-    int y = 16 + i * 12;
-    bool s = (i == sel);
-    uint16_t bg = s ? TFT_NAVY : COL_BG;
-    if (s) tft.fillRect(0, y - 6, LCD_W, 12, bg);
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(s ? TFT_WHITE : TFT_DARKGREY, bg);
-    tft.drawString(MENU_ITEMS[i], 8, y, 1);
-  }
+  for (int i = 0; i < MENU_N; ++i) drawMenuItem(i, i == sel);
 }
 
 // --- Menu item 1: Gimbals position + channel reverse (flip).
@@ -588,8 +591,8 @@ void drawBatteryDynamic(bool force) {
 const int EDIT_TOGGLE[9] = {0, 1, 2, 3, 4, 6, 7, 8, 9};  // toggle indices, skip Toggle6
 constexpr int EDIT_TOGGLE_N = 9;
 
-void drawToggleMap(int cursor, bool editing) {
-  tft.fillScreen(COL_BG);
+void drawToggleHeader(bool editing) {
+  tft.fillRect(0, 0, LCD_W, 12, COL_BG);  // clear header row only
   tft.setTextPadding(0);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_YELLOW, COL_BG);
@@ -597,32 +600,36 @@ void drawToggleMap(int cursor, bool editing) {
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(TFT_DARKGREY, COL_BG);
   tft.drawString(editing ? "UP/DN:chan  OK:set" : "OK:edit  CXL:back", LCD_W - 4, 5, 1);
+}
 
-  int cur_toggle = EDIT_TOGGLE[cursor];
+// Redraw a single toggle cell (clears just its own area — no full-screen blank).
+void drawToggleCell(int t, bool sel, bool editing) {
+  int col = t < 5 ? 0 : 1;
+  int row = t < 5 ? t : t - 5;
+  int x = col ? 152 : 8;
+  int y = 17 + row * 12;
+  uint16_t bg = sel ? TFT_NAVY : COL_BG;
+  tft.fillRect(col ? 148 : 2, y - 6, 134, 12, bg);  // clear only this cell
   char b[16];
-  for (int t = 0; t < 10; ++t) {  // 2 columns x 5 rows
-    int col = t < 5 ? 0 : 1;
-    int row = t < 5 ? t : t - 5;
-    int x = col ? 152 : 8;
-    int y = 17 + row * 12;
-    bool sel = (t == cur_toggle);
-    if (t == 5) {
-      snprintf(b, sizeof(b), "T6  MENU");
-    } else {
-      uint8_t c = gconfig_toggle_chan(t);
-      if (c) snprintf(b, sizeof(b), "T%-2d CH%u", t + 1, c);
-      else snprintf(b, sizeof(b), "T%-2d --", t + 1);
-    }
-    uint16_t bg = COL_BG, fg = (t == 5) ? TFT_DARKGREY : TFT_WHITE;
-    if (sel) {
-      bg = TFT_NAVY;
-      fg = editing ? TFT_GREEN : TFT_YELLOW;  // green while editing the channel
-      tft.fillRect(col ? 148 : 2, y - 6, 134, 12, bg);
-    }
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(fg, bg);
-    tft.drawString(b, x, y, 1);
+  if (t == 5) {
+    snprintf(b, sizeof(b), "T6  MENU");
+  } else {
+    uint8_t c = gconfig_toggle_chan(t);
+    if (c) snprintf(b, sizeof(b), "T%-2d CH%u", t + 1, c);
+    else snprintf(b, sizeof(b), "T%-2d --", t + 1);
   }
+  uint16_t fg = (t == 5) ? TFT_DARKGREY : (sel ? (editing ? TFT_GREEN : TFT_YELLOW) : TFT_WHITE);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextPadding(0);
+  tft.setTextColor(fg, bg);
+  tft.drawString(b, x, y, 1);
+}
+
+void drawToggleMapFull(int cursor, bool editing) {
+  tft.fillScreen(COL_BG);
+  drawToggleHeader(editing);
+  int cur_toggle = EDIT_TOGGLE[cursor];
+  for (int t = 0; t < 10; ++t) drawToggleCell(t, t == cur_toggle, editing);
 }
 
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
@@ -646,11 +653,17 @@ void configLoop() {
     switch (page) {
       case Page::List:
         if (redraw) {
-          drawMenuList(sel);
+          drawMenuListFull(sel);
           redraw = false;
         }
-        if (up && sel > 0) drawMenuList(--sel);
-        if (dn && sel < MENU_N - 1) drawMenuList(++sel);
+        if (up && sel > 0) {  // redraw only old + new rows
+          drawMenuItem(sel, false);
+          drawMenuItem(--sel, true);
+        }
+        if (dn && sel < MENU_N - 1) {
+          drawMenuItem(sel, false);
+          drawMenuItem(++sel, true);
+        }
         if (ok) {
           page = (Page)(1 + sel);
           redraw = true;
@@ -680,43 +693,54 @@ void configLoop() {
       }
       case Page::Toggles: {
         if (redraw) {
-          drawToggleMap(tmcursor, tm_editing);
+          drawToggleMapFull(tmcursor, tm_editing);
           redraw = false;
         }
         int t = EDIT_TOGGLE[tmcursor];
         if (!tm_editing) {
-          // Selection mode: move cursor, OK enters edit, CANCEL backs out.
-          if (up && tmcursor > 0) drawToggleMap(--tmcursor, false);
-          if (dn && tmcursor < EDIT_TOGGLE_N - 1) drawToggleMap(++tmcursor, false);
+          // Selection mode: move cursor (redraw only old+new cells).
+          if (up && tmcursor > 0) {
+            tmcursor--;
+            drawToggleCell(t, false, false);
+            drawToggleCell(EDIT_TOGGLE[tmcursor], true, false);
+          }
+          if (dn && tmcursor < EDIT_TOGGLE_N - 1) {
+            tmcursor++;
+            drawToggleCell(t, false, false);
+            drawToggleCell(EDIT_TOGGLE[tmcursor], true, false);
+          }
           if (ok) {
             tm_editing = true;
             tm_prevchan = gconfig_toggle_chan(t);
-            drawToggleMap(tmcursor, true);
+            drawToggleHeader(true);
+            drawToggleCell(t, true, true);
           }
           if (cx) {
             page = Page::List;
             redraw = true;
           }
         } else {
-          // Edit mode: up/down cycle channel, OK accepts (+save), CANCEL reverts.
+          // Edit mode: up/down cycle channel (redraw only this cell).
           uint8_t c = gconfig_toggle_chan(t);
           if (up) {  // none -> 5..16 -> none
             gconfig_set_toggle_chan(t, (c == 0) ? 5 : (c >= 16 ? 0 : c + 1));
-            drawToggleMap(tmcursor, true);
+            drawToggleCell(t, true, true);
           }
           if (dn) {  // none -> 16..5 -> none
             gconfig_set_toggle_chan(t, (c == 0) ? 16 : (c <= 5 ? 0 : c - 1));
-            drawToggleMap(tmcursor, true);
+            drawToggleCell(t, true, true);
           }
           if (ok) {
             safeSaveGconfig();
             tm_editing = false;
-            drawToggleMap(tmcursor, false);
+            drawToggleHeader(false);
+            drawToggleCell(t, true, false);
           }
           if (cx) {
             gconfig_set_toggle_chan(t, tm_prevchan);  // revert
             tm_editing = false;
-            drawToggleMap(tmcursor, false);
+            drawToggleHeader(false);
+            drawToggleCell(t, true, false);
           }
         }
         break;
