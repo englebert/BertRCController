@@ -22,6 +22,7 @@ constexpr int DEBOUNCE_POLLS = 3;  // 3 * 20 ms = 60 ms
 
 Adafruit_MCP23X17 mcp;
 bool g_present = false;
+TaskHandle_t g_task = nullptr;
 
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 SwitchState g_state = {0, false};
@@ -82,7 +83,7 @@ bool switches_start() {
   }
 
   BaseType_t ok = xTaskCreatePinnedToCore(switchesTask, "switches", 3072, nullptr,
-                                          /*priority=*/1, nullptr, /*core=*/0);
+                                          /*priority=*/1, &g_task, /*core=*/0);
   return ok == pdPASS;
 }
 
@@ -91,4 +92,12 @@ bool switches_get(SwitchState& out) {
   out = g_state;
   portEXIT_CRITICAL(&g_mux);
   return out.valid;
+}
+
+void switches_pause() {
+  if (g_task) vTaskSuspend(g_task);
+}
+
+void switches_resume() {
+  if (g_task) vTaskResume(g_task);
 }

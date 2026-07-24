@@ -218,7 +218,8 @@ void crsf_get_channels(uint16_t out[16]) {
 
 
 void crsf_pause() {
-  if (g_task) vTaskSuspend(g_task);
+  if (!g_task) return;             // task never started (e.g. module-WiFi mode)
+  vTaskSuspend(g_task);
   uart.flush();                    // let in-flight TX finish
   vTaskDelay(pdMS_TO_TICKS(10));   // and the echo/telemetry burst drain
 }

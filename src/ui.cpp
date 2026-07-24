@@ -133,7 +133,7 @@ void setStatus(int i, bool ok) {
   tft.drawString(ok ? "OK" : "FAIL", LCD_W - 4, rowY(i), 2);
 }
 
-void runInit() {
+void runInit(bool start_crsf) {
   drawInitList();
   vTaskDelay(pdMS_TO_TICKS(250));
   setStatus(0, power_start());
@@ -142,7 +142,16 @@ void runInit() {
   vTaskDelay(pdMS_TO_TICKS(350));
   setStatus(2, gimbals_start());
   vTaskDelay(pdMS_TO_TICKS(350));
-  setStatus(3, crsf_start());
+  // In module-WiFi-setup mode, deliberately do NOT start CRSF so the module (seeing
+  // no handset) drops into its WiFi config mode.
+  if (start_crsf) {
+    setStatus(3, crsf_start());
+  } else {
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextPadding(tft.textWidth("FAIL", 2));
+    tft.setTextColor(TFT_CYAN, COL_BG);
+    tft.drawString("OFF", LCD_W - 4, rowY(3), 2);
+  }
   vTaskDelay(pdMS_TO_TICKS(700));
 }
 
@@ -631,7 +640,7 @@ void drawCrsfStatic() {
   tft.drawString("CRSF MODULE", 4, 6, 1);
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("CXL=back", LCD_W - 4, 6, 1);
+  tft.drawString("OK:WiFi  CXL:back", LCD_W - 4, 6, 1);
   // Static labels.
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_DARKGREY, COL_BG);
@@ -689,6 +698,46 @@ void drawCrsfDynamic(bool force) {
   }
 }
 
+// NVS write for the WiFi-boot flag with interrupt-heavy peripherals quiesced.
+bool safeSetWifiBoot(bool v) {
+  crsf_pause();
+  gimbals_pause();
+  switches_pause();
+  storage_set_wifi_boot(v);
+  switches_resume();
+  gimbals_resume();
+  crsf_resume();
+  return true;
+}
+
+void drawWifiConfirm() {
+  tft.fillScreen(COL_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextPadding(0);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("MODULE WIFI SETUP?", LCD_W / 2, 16, 2);
+  tft.setTextColor(TFT_WHITE, COL_BG);
+  tft.drawString("reboots with CRSF off", LCD_W / 2, 38, 1);
+  tft.drawString("OK = yes     CXL = no", LCD_W / 2, 58, 1);
+}
+
+// Shown at boot while the WiFi-boot flag is set (CRSF never started).
+void drawWifiSetup() {
+  tft.fillScreen(COL_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextPadding(0);
+  tft.setTextColor(TFT_CYAN, COL_BG);
+  tft.drawString("MODULE WIFI SETUP", LCD_W / 2, 8, 1);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_WHITE, COL_BG);
+  tft.drawString("1. Power-cycle ELRS module", 6, 20, 1);
+  tft.drawString("2. WiFi: ExpressLRS TX", 6, 32, 1);
+  tft.drawString("   pw: expresslrs", 6, 44, 1);
+  tft.drawString("3. http://10.0.0.1", 6, 56, 1);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("Toggle6 OFF = exit & fly", 6, 68, 1);
+}
+
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
 void configLoop() {
   enum class Page : uint8_t { List, Gimbals, Toggles, Battery, Crsf, Reboot };
@@ -698,6 +747,7 @@ void configLoop() {
   int tmcursor = 0;  // selected toggle on the Toggle Mapping page
   bool tm_editing = false;
   uint8_t tm_prevchan = 0;  // channel before entering edit (for CANCEL revert)
+  bool crsf_confirm = false;  // CRSF page: WiFi-setup confirm dialog
   bool redraw = true;
   EdgeKey ku, kd, kok, kcx;
   const TickType_t period = pdMS_TO_TICKS(50);
@@ -829,13 +879,29 @@ void configLoop() {
       case Page::Crsf: {
         bool first = redraw;
         if (redraw) {
-          drawCrsfStatic();
+          if (crsf_confirm) drawWifiConfirm();
+          else drawCrsfStatic();
           redraw = false;
         }
-        drawCrsfDynamic(first);
-        if (cx) {
-          page = Page::List;
-          redraw = true;
+        if (crsf_confirm) {
+          if (ok) {  // enter module WiFi setup: set flag, reboot (CRSF stays off)
+            safeSetWifiBoot(true);
+            doReboot();  // does not return
+          }
+          if (cx) {
+            crsf_confirm = false;
+            redraw = true;
+          }
+        } else {
+          drawCrsfDynamic(first);
+          if (ok) {  // OK -> confirm module WiFi setup
+            crsf_confirm = true;
+            redraw = true;
+          }
+          if (cx) {
+            page = Page::List;
+            redraw = true;
+          }
         }
         break;
       }
@@ -929,10 +995,29 @@ void appTask(void*) {
   Serial.printf("[ui] app up: %dx%d @ viewport(%d,%d) rot=%d\n", LCD_W, LCD_H, VP_X, VP_Y,
                 PANEL_ROTATION);
 
-  bootScreen();
-  vTaskDelay(pdMS_TO_TICKS(3000));  // "BOOTING UP" for 3 s
+  // Module-WiFi-setup mode: init peripherals but WITHOUT CRSF, then hold on the WiFi
+  // info screen until Toggle6 is flipped to exit (clears the flag and reboots to fly).
+  bool wifi_setup = storage_get_wifi_boot();
 
-  runInit();  // INA226 -> MCP23017 -> Gimbals -> CRSF, with per-module status
+  bootScreen();
+  vTaskDelay(pdMS_TO_TICKS(wifi_setup ? 1000 : 3000));  // "BOOTING UP"
+
+  runInit(!wifi_setup);  // start CRSF only when NOT in WiFi setup
+
+  if (wifi_setup) {
+    Serial.println("[ui] MODULE WIFI SETUP mode (CRSF off)");
+    drawWifiSetup();
+    // We entered from config mode (Toggle6 ON). Exit when Toggle6 goes OFF (= fly),
+    // once the switch reading is valid so we don't exit before the MCP is read.
+    for (;;) {
+      SwitchState sw;
+      if (switches_get(sw) && !(sw.bits & (1u << TOGGLE6_BIT))) {
+        safeSetWifiBoot(false);  // clear flag, reboot to normal
+        doReboot();              // does not return
+      }
+      vTaskDelay(pdMS_TO_TICKS(100));
+    }
+  }
 
   // Toggle5 ON at power-up forces a fresh calibration; otherwise use the stored one.
   // First boot (nothing stored) always calibrates.

@@ -34,6 +34,11 @@ bool storage_save_flip(const bool in[4]);
 bool storage_load_toggles(uint8_t out[10]);
 bool storage_save_toggles(const uint8_t in[10]);
 
+// "Boot into module-WiFi-setup" flag: when set, the app boots without starting CRSF
+// so the ELRS module (seeing no handset) enters its WiFi config mode.
+bool storage_get_wifi_boot();
+void storage_set_wifi_boot(bool v);
+
 // Total accumulated flight time (persisted). Used by Phase 2.
 uint32_t storage_get_total_flight_secs();
 void storage_add_flight_secs(uint32_t secs);

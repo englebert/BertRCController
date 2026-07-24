@@ -20,3 +20,7 @@ bool switches_start();
 
 // Copy the latest debounced state into `out`. Returns out.valid. Safe from any task.
 bool switches_get(SwitchState& out);
+
+// Suspend/resume the polling task (wrap NVS/flash writes when this task is running).
+void switches_pause();
+void switches_resume();

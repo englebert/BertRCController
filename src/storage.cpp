@@ -13,6 +13,7 @@ constexpr const char* NS = "bertrc";
 constexpr const char* KEY_CAL = "gcal";
 constexpr const char* KEY_FLIP = "gflip";
 constexpr const char* KEY_TMAP = "tmap";
+constexpr const char* KEY_WIFI_BOOT = "wifiboot";
 constexpr const char* KEY_TOTAL_FLIGHT = "tflight";
 
 }  // namespace
@@ -73,6 +74,15 @@ bool storage_load_toggles(uint8_t out[10]) {
 bool storage_save_toggles(const uint8_t in[10]) {
   if (!g_open) return false;
   return prefs.putBytes(KEY_TMAP, in, 10) == 10;
+}
+
+bool storage_get_wifi_boot() {
+  if (!g_open) return false;
+  return prefs.getBool(KEY_WIFI_BOOT, false);
+}
+
+void storage_set_wifi_boot(bool v) {
+  if (g_open) prefs.putBool(KEY_WIFI_BOOT, v);
 }
 
 uint32_t storage_get_total_flight_secs() {
