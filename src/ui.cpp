@@ -120,26 +120,30 @@ void runInit() {
   vTaskDelay(pdMS_TO_TICKS(700));
 }
 
-// ---- Gimbal calibration wizard (first boot / no stored cal) ----
-// No timer: keeps capturing until every stick has covered MIN_SPAN. Live per-stick
-// cells show captured span (red -> green), so a dead/under-ranging pot is obvious.
+// ---- Gimbal calibration wizard (first boot / Toggle5 at power-up) ----
+// A stick is confirmed only after it has been swept fully in each direction the
+// required number of times: low->high (records the MAX) x3, and high->low (records
+// the MIN) x3. Direction is detected with hysteresis (crossing the 20%/80% band of
+// the span seen so far). Rejects single accidental extremes and noise.
 void calibrationWizard() {
-  constexpr int TICK_MS = 25;
-  // Must beat electrical noise (seen up to ~400 p-p on a marginal harness); a real
-  // full-stick sweep spans ~2000+.
-  constexpr int MIN_SPAN = 800;
+  constexpr int TICK_MS = 20;
+  constexpr int NEED = 3;          // sweeps required each direction
+  constexpr int COUNT_SPAN = 1000;  // span must exceed this before counting starts
   const char* const NAME[4] = {"THR", "YAW", "PIT", "ROL"};
+  enum Zone : uint8_t { UNK, LO, HI };
 
   tft.fillScreen(TFT_BLACK);
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("CALIBRATE: circle sticks around corners", LCD_W / 2, 8, 1);
+  tft.drawString("CALIBRATE: sweep each stick min<->max x3", LCD_W / 2, 8, 1);
 
   uint16_t mn[4] = {4095, 4095, 4095, 4095};
   uint16_t mx[4] = {0, 0, 0, 0};
+  uint8_t up[4] = {0, 0, 0, 0};    // low->high sweeps (confirm MAX)
+  uint8_t dn[4] = {0, 0, 0, 0};    // high->low sweeps (confirm MIN)
+  Zone zone[4] = {UNK, UNK, UNK, UNK};
 
-  // 4 cells across: label + live span, green border once that stick passes.
   const int cw = 66, gap = 4;
   const int x0 = (LCD_W - 4 * cw - 3 * gap) / 2;
   const int cy = 20, chh = 44;
@@ -148,7 +152,7 @@ void calibrationWizard() {
     int x = x0 + i * (cw + gap);
     tft.drawRoundRect(x, cy, cw, chh, 4, TFT_RED);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
-    tft.drawString(NAME[i], x + cw / 2, cy + 8, 1);
+    tft.drawString(NAME[i], x + cw / 2, cy + 7, 1);
   }
 
   uint32_t tick = 0;
@@ -157,31 +161,39 @@ void calibrationWizard() {
     gimbals_get(g);
     const int raw[4] = {g.throttle, g.yaw, g.pitch, g.roll};
     for (int i = 0; i < 4; ++i) {
-      uint16_t v = (uint16_t)constrain(raw[i], 0, 4095);
+      int v = constrain(raw[i], 0, 4095);
       if (v < mn[i]) mn[i] = v;
       if (v > mx[i]) mx[i] = v;
+      int span = mx[i] - mn[i];
+      if (span < COUNT_SPAN) continue;  // range not established yet
+      int hi = mn[i] + span * 4 / 5;    // 80%
+      int lo = mn[i] + span / 5;        // 20%
+      if (v >= hi) {
+        if (zone[i] == LO && up[i] < NEED) up[i]++;  // completed a low->high sweep
+        zone[i] = HI;
+      } else if (v <= lo) {
+        if (zone[i] == HI && dn[i] < NEED) dn[i]++;  // completed a high->low sweep
+        zone[i] = LO;
+      }
     }
 
-    // Update cells ~5 Hz: live raw value (top) + captured span (bottom).
+    // Update cells ~5 Hz: up-sweep count (records MAX) + down-sweep count (records MIN).
     if ((tick++ % 8) == 0) {
       bool all = true;
       char b[10];
       for (int i = 0; i < 4; ++i) {
-        int span = (mx[i] >= mn[i]) ? mx[i] - mn[i] : 0;
-        bool pass = span >= MIN_SPAN;
-        if (!pass) all = false;
+        bool cell_done = (up[i] >= NEED) && (dn[i] >= NEED);
+        if (!cell_done) all = false;
         int x = x0 + i * (cw + gap);
         tft.setTextDatum(MC_DATUM);
         tft.setTextPadding(cw - 8);
-        // Live raw: proves whether the pot tracks the stick at all.
-        snprintf(b, sizeof(b), "%d", raw[i]);
-        tft.setTextColor(TFT_WHITE, TFT_BLACK);
-        tft.drawString(b, x + cw / 2, cy + 20, 1);
-        // Captured span so far.
-        snprintf(b, sizeof(b), "%d", span);
-        tft.setTextColor(pass ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
-        tft.drawString(b, x + cw / 2, cy + 33, 1);
-        if (pass && !done_cell[i]) {
+        snprintf(b, sizeof(b), "MX %d/%d", up[i], NEED);
+        tft.setTextColor(up[i] >= NEED ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
+        tft.drawString(b, x + cw / 2, cy + 22, 1);
+        snprintf(b, sizeof(b), "MN %d/%d", dn[i], NEED);
+        tft.setTextColor(dn[i] >= NEED ? TFT_GREEN : TFT_ORANGE, TFT_BLACK);
+        tft.drawString(b, x + cw / 2, cy + 34, 1);
+        if (cell_done && !done_cell[i]) {
           done_cell[i] = true;
           tft.drawRoundRect(x, cy, cw, chh, 4, TFT_GREEN);
         }
