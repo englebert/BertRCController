@@ -364,8 +364,8 @@ void renderRc() {
 // roll >1800 = OK (enter), <1200 = CANCEL (back).
 bool toggleOn(int bit);  // fwd decl (defined below)
 
-const char* const MENU_ITEMS[] = {"Gimbals & Trim", "Toggle Mapping", "Battery Info",
-                                   "CRSF Module", "Reboot"};
+const char* const MENU_ITEMS[] = {"GIMBALS & TRIM", "TOGGLE MAPPING", "BATTERY INFO",
+                                   "CRSF MODULE", "REBOOT"};
 constexpr int MENU_N = 5;
 
 struct RawKeys {
