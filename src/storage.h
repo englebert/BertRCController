@@ -24,6 +24,11 @@ bool storage_init();
 bool storage_load_cal(GimbalCal& out);
 bool storage_save_cal(const GimbalCal& cal);
 
+// Per-gimbal channel reverse (flip) flags. Index 0=T,1=Y,2=P,3=R.
+// load returns false (leaving defaults) when nothing is stored yet.
+bool storage_load_flip(bool out[4]);
+bool storage_save_flip(const bool in[4]);
+
 // Total accumulated flight time (persisted). Used by Phase 2.
 uint32_t storage_get_total_flight_secs();
 void storage_add_flight_secs(uint32_t secs);

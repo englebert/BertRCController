@@ -11,6 +11,7 @@
 
 #include "crsf.h"
 #include "display_cfg.h"
+#include "gconfig.h"
 #include "gimbals.h"
 #include "pins.h"
 #include "power.h"
@@ -51,6 +52,15 @@ bool safeSaveCal(const GimbalCal& cal) {
   crsf_pause();
   gimbals_pause();
   bool ok = storage_save_cal(cal);
+  gimbals_resume();
+  crsf_resume();
+  return ok;
+}
+
+bool safeSaveFlip() {
+  crsf_pause();
+  gimbals_pause();
+  bool ok = gconfig_save();
   gimbals_resume();
   crsf_resume();
   return ok;
@@ -297,52 +307,226 @@ void renderRc() {
   tft.drawString(b, LCD_W / 2, 58, 2);
 }
 
-// ---- Configuration screen (menu framework seed: gimbal keys) ----
-// Pitch = UP/DOWN, Roll = OK/CANCEL per TASK01.md thresholds.
-struct Keys {
+// ---- Config-mode menu system ----
+// Navigation via gimbal keys (TASK01.md): pitch >1800us = UP, <1200 = DOWN;
+// roll >1800 = OK (enter), <1200 = CANCEL (back).
+bool toggleOn(int bit);  // fwd decl (defined below)
+
+const char* const MENU_ITEMS[] = {"Gimbals & Trim", "Toggle Mapping", "Battery Info",
+                                   "CRSF Module", "Reboot"};
+constexpr int MENU_N = 5;
+
+struct RawKeys {
   bool up, down, ok, cancel;
 };
 
-Keys readKeys() {
+RawKeys readRawKeys() {
   GimbalState g;
   gimbals_get(g);
-  int pitch_us = calUs(2, g.pitch);
-  int roll_us = calUs(3, g.roll);
-  Keys k;
-  k.up = pitch_us > KEY_HI_US;
-  k.down = pitch_us < KEY_LO_US;
-  k.ok = roll_us > KEY_HI_US;
-  k.cancel = roll_us < KEY_LO_US;
-  return k;
+  int p = calUs(2, g.pitch);
+  int r = calUs(3, g.roll);
+  return {p > KEY_HI_US, p < KEY_LO_US, r > KEY_HI_US, r < KEY_LO_US};
 }
 
-void drawConfigStatic() {
+// Edge detector with auto-repeat (fires once on press, then repeats while held).
+struct EdgeKey {
+  bool prev = false;
+  int ctr = 0;
+  static constexpr int REPEAT_DELAY = 10;   // ~500 ms at 50 ms/tick before repeat
+  static constexpr int REPEAT_PERIOD = 4;   // ~200 ms between repeats
+  bool poll(bool pressed) {
+    bool fire = false;
+    if (pressed) {
+      if (!prev) {
+        fire = true;
+        ctr = 0;
+      } else if (++ctr >= REPEAT_DELAY) {
+        fire = true;
+        ctr = REPEAT_DELAY - REPEAT_PERIOD;
+      }
+    } else {
+      ctr = 0;
+    }
+    prev = pressed;
+    return fire;
+  }
+};
+
+void drawMenuList(int sel) {
+  tft.fillScreen(COL_BG);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextPadding(0);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("CONFIG", 4, 5, 1);
+  for (int i = 0; i < MENU_N; ++i) {  // font 1 so all items fit the 76 px height
+    int y = 16 + i * 12;
+    bool s = (i == sel);
+    uint16_t bg = s ? TFT_NAVY : COL_BG;
+    if (s) tft.fillRect(0, y - 6, LCD_W, 12, bg);
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(s ? TFT_WHITE : TFT_DARKGREY, bg);
+    tft.drawString(MENU_ITEMS[i], 8, y, 1);
+  }
+}
+
+// --- Menu item 1: Gimbals position + channel reverse (flip).
+// Toggle5 ON = edit mode: pitch up/down moves the cursor, roll-right (OK) flips the
+// selected channel (saved to NVS), roll-left (CANCEL) backs out. Toggle5 OFF = view only.
+void drawGimbalPosStatic() {
+  tft.fillScreen(COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("GIMBALS", 4, 6, 1);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  tft.drawString("T5:edit/back  OK:flip", LCD_W - 4, 6, 1);
+}
+
+void drawGimbalPage(int cursor, bool edit) {
+  static const char* const NAME[4] = {"THR", "YAW", "PIT", "ROL"};
+  GimbalState g;
+  gimbals_get(g);
+  const int raw[4] = {g.throttle, g.yaw, g.pitch, g.roll};
+  const int top = 16, rowh = 15, bx = 30, bw = 150;
+  char b[10];
+  for (int i = 0; i < 4; ++i) {
+    bool sel = edit && (i == cursor);
+    bool fl = gconfig_flip(i);
+    float pct = calPct(i, raw[i]);
+    if (fl) pct = 100.0f - pct;  // show the reversed position
+    int y = top + i * rowh, cy = y + rowh / 2;
+    int fw = constrain((int)(pct * bw / 100.0f), 0, bw);
+
+    // Cursor (only in edit mode).
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextPadding(7);
+    tft.setTextColor(sel ? TFT_YELLOW : COL_BG, COL_BG);
+    tft.drawString(">", 1, cy, 1);
+    // Name.
+    tft.setTextPadding(0);
+    tft.setTextColor(sel ? TFT_YELLOW : TFT_CYAN, COL_BG);
+    tft.drawString(NAME[i], 9, cy, 1);
+    // Bar.
+    tft.fillRect(bx, y + 2, fw, rowh - 4, TFT_GREEN);
+    tft.fillRect(bx + fw, y + 2, bw - fw, rowh - 4, TFT_DARKGREY);
+    // Percent.
+    snprintf(b, sizeof(b), "%3d%%", (int)(pct + 0.5f));
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextPadding(30);
+    tft.setTextColor(TFT_WHITE, COL_BG);
+    tft.drawString(b, bx + bw + 34, cy, 1);
+    // Reverse flag.
+    tft.setTextPadding(28);
+    tft.setTextColor(fl ? TFT_RED : TFT_DARKGREY, COL_BG);
+    tft.drawString(fl ? "REV" : "NOR", LCD_W - 2, cy, 1);
+  }
+}
+
+void drawStub(const char* title) {
   tft.fillScreen(COL_BG);
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("CONFIG MODE", LCD_W / 2, 10, 2);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString(title, LCD_W / 2, 24, 2);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  tft.drawString("coming soon  -  CXL=back", LCD_W / 2, 50, 1);
 }
 
-void drawKeyBox(int i, const char* label, bool on) {
-  const int bw = 64, bh = 34, gap = 6;
-  const int x0 = (LCD_W - 4 * bw - 3 * gap) / 2 + i * (bw + gap);
-  const int y0 = 26;
-  uint16_t bg = on ? TFT_GREEN : TFT_BLACK;
-  tft.fillRoundRect(x0, y0, bw, bh, 4, bg);
-  tft.drawRoundRect(x0, y0, bw, bh, 4, on ? TFT_GREEN : TFT_DARKGREY);
+void drawRebootConfirm() {
+  tft.fillScreen(COL_BG);
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
-  tft.setTextColor(on ? TFT_BLACK : TFT_WHITE, bg);
-  tft.drawString(label, x0 + bw / 2, y0 + bh / 2, 2);
+  tft.setTextColor(TFT_RED, COL_BG);
+  tft.drawString("REBOOT?", LCD_W / 2, 24, 4);
+  tft.setTextColor(TFT_WHITE, COL_BG);
+  tft.drawString("OK = yes     CXL = no", LCD_W / 2, 56, 1);
 }
 
-void renderConfig() {
-  Keys k = readKeys();
-  drawKeyBox(0, "UP", k.up);
-  drawKeyBox(1, "DOWN", k.down);
-  drawKeyBox(2, "OK", k.ok);
-  drawKeyBox(3, "CXL", k.cancel);
+void doReboot() {
+  tft.fillScreen(COL_BG);
+  tft.setTextDatum(MC_DATUM);
+  tft.setTextPadding(0);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("REBOOTING", LCD_W / 2, LCD_H / 2, 4);
+  vTaskDelay(pdMS_TO_TICKS(500));
+  ESP.restart();
+}
+
+// Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
+void configLoop() {
+  enum class Page : uint8_t { List, Gimbals, Toggles, Battery, Crsf, Reboot };
+  Page page = Page::List;
+  int sel = 0;
+  int gcursor = 0;  // selected channel on the Gimbals page
+  bool redraw = true;
+  EdgeKey ku, kd, kok, kcx;
+  const TickType_t period = pdMS_TO_TICKS(50);
+
+  while (toggleOn(TOGGLE6_BIT)) {
+    RawKeys r = readRawKeys();
+    bool up = ku.poll(r.up), dn = kd.poll(r.down), ok = kok.poll(r.ok),
+         cx = kcx.poll(r.cancel);
+
+    switch (page) {
+      case Page::List:
+        if (redraw) {
+          drawMenuList(sel);
+          redraw = false;
+        }
+        if (up && sel > 0) drawMenuList(--sel);
+        if (dn && sel < MENU_N - 1) drawMenuList(++sel);
+        if (ok) {
+          page = (Page)(1 + sel);
+          redraw = true;
+        }
+        break;
+      case Page::Gimbals: {
+        if (redraw) {
+          drawGimbalPosStatic();
+          redraw = false;
+        }
+        bool edit = toggleOn(TOGGLE5_BIT);  // Toggle5 gates editing AND back
+        if (edit) {
+          if (up && gcursor > 0) gcursor--;
+          if (dn && gcursor < 3) gcursor++;
+          if (ok) {  // flip the selected channel and persist
+            gconfig_set_flip(gcursor, !gconfig_flip(gcursor));
+            safeSaveFlip();
+          }
+          if (cx) {
+            page = Page::List;
+            redraw = true;
+            break;
+          }
+        }
+        drawGimbalPage(gcursor, edit);
+        break;
+      }
+      case Page::Reboot:
+        if (redraw) {
+          drawRebootConfirm();
+          redraw = false;
+        }
+        if (ok) doReboot();  // does not return
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        break;
+      default:  // Toggles / Battery / Crsf stubs
+        if (redraw) {
+          drawStub(MENU_ITEMS[(int)page - 1]);
+          redraw = false;
+        }
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        break;
+    }
+    vTaskDelay(period);
+  }
 }
 
 // ---- Gimbal wiring debug screen (bars + raw per channel). Not in the normal flow;
@@ -390,21 +574,21 @@ bool toggleOn(int bit) {
   return sw.bits & (1u << bit);
 }
 
-void modeLoop() {
-  enum class Screen { None, Rc, Config };
-  Screen cur = Screen::None;
-  const TickType_t period = pdMS_TO_TICKS(50);  // ~20 Hz
-
-  for (;;) {
-    Screen want = toggleOn(TOGGLE6_BIT) ? Screen::Config : Screen::Rc;
-    if (want != cur) {
-      cur = want;
-      if (cur == Screen::Config) drawConfigStatic();
-      else drawRcStatic();
-    }
-    if (cur == Screen::Config) renderConfig();
-    else renderRc();
+// RC screen loop — runs while Toggle6 is OFF; returns when it goes ON.
+void rcLoop() {
+  drawRcStatic();
+  const TickType_t period = pdMS_TO_TICKS(200);  // ~5 Hz
+  while (!toggleOn(TOGGLE6_BIT)) {
+    renderRc();
     vTaskDelay(period);
+  }
+}
+
+// Live Toggle6 mode switch: OFF = RC screen, ON = configuration menu.
+void modeLoop() {
+  for (;;) {
+    if (toggleOn(TOGGLE6_BIT)) configLoop();
+    else rcLoop();
   }
 }
 
@@ -412,6 +596,7 @@ void appTask(void*) {
   // NVS first, while no peripheral tasks/ISRs exist yet — flash init may write, and a
   // busy ISR during a flash-cache-disabled window panics the chip.
   storage_init();
+  gconfig_init();  // load per-channel flip flags (default none) before CRSF uses them
 
   tft.init();
   tft.setRotation(PANEL_ROTATION);

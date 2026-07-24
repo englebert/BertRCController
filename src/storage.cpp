@@ -11,6 +11,7 @@ bool g_open = false;
 
 constexpr const char* NS = "bertrc";
 constexpr const char* KEY_CAL = "gcal";
+constexpr const char* KEY_FLIP = "gflip";
 constexpr const char* KEY_TOTAL_FLIGHT = "tflight";
 
 }  // namespace
@@ -46,6 +47,21 @@ bool storage_save_cal(const GimbalCal& cal) {
     buf[8 + i] = cal.mid[i];
   }
   return prefs.putBytes(KEY_CAL, buf, sizeof(buf)) == sizeof(buf);
+}
+
+bool storage_load_flip(bool out[4]) {
+  if (!g_open) return false;
+  uint8_t buf[4];
+  if (prefs.getBytes(KEY_FLIP, buf, sizeof(buf)) != sizeof(buf)) return false;
+  for (int i = 0; i < 4; ++i) out[i] = (buf[i] != 0);
+  return true;
+}
+
+bool storage_save_flip(const bool in[4]) {
+  if (!g_open) return false;
+  uint8_t buf[4];
+  for (int i = 0; i < 4; ++i) buf[i] = in[i] ? 1 : 0;
+  return prefs.putBytes(KEY_FLIP, buf, sizeof(buf)) == sizeof(buf);
 }
 
 uint32_t storage_get_total_flight_secs() {

@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 
+#include "gconfig.h"
 #include "gimbals.h"
 #include "pins.h"
 #include "switches.h"
@@ -58,9 +59,12 @@ void packChannels(const uint16_t ch[16], uint8_t out[22]) {
   }
 }
 
-uint16_t adcToCrsf(int16_t adc) {
+// idx: 0=T,1=Y,2=P,3=R (for the per-channel reverse/flip flag).
+uint16_t adcToCrsf(int16_t adc, int idx) {
   int v = constrain((int)adc, 0, 4095);
-  return (uint16_t)(CRSF_MIN + (long)v * (CRSF_MAX - CRSF_MIN) / 4095);
+  uint16_t out = (uint16_t)(CRSF_MIN + (long)v * (CRSF_MAX - CRSF_MIN) / 4095);
+  if (gconfig_flip(idx)) out = (uint16_t)(CRSF_MIN + CRSF_MAX - out);  // reverse
+  return out;
 }
 
 // Toggle -> MCP23017 bit map (A0-A7 = bits 0-7, B0-B7 = bits 8-15).
@@ -85,10 +89,10 @@ void buildChannels(uint16_t ch[16]) {
   switches_get(sw);
 
   // AETR: CH1=Roll, CH2=Pitch, CH3=Throttle, CH4=Yaw.
-  ch[0] = adcToCrsf(g.roll);
-  ch[1] = adcToCrsf(g.pitch);
-  ch[2] = adcToCrsf(g.throttle);
-  ch[3] = adcToCrsf(g.yaw);
+  ch[0] = adcToCrsf(g.roll, 3);
+  ch[1] = adcToCrsf(g.pitch, 2);
+  ch[2] = adcToCrsf(g.throttle, 0);
+  ch[3] = adcToCrsf(g.yaw, 1);
   // CH5..CH14 = the 10 toggles, per TOGGLE_BIT map.
   for (int i = 0; i < 10; ++i) {
     ch[4 + i] = (sw.bits & (1u << TOGGLE_BIT[i])) ? CRSF_MAX : CRSF_MIN;
