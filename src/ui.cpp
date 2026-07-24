@@ -293,10 +293,10 @@ void drawThrottleWarning() {
   tft.fillScreen(COL_BG);
   // Warning triangle, left side.
   const int cx = 34, cy = LCD_H / 2;
-  tft.fillTriangle(cx, cy - 24, cx - 26, cy + 22, cx + 26, cy + 22, TFT_YELLOW);
+  tft.fillTriangle(cx, cy - 24, cx - 26, cy + 22, cx + 26, cy + 22, TFT_RED);
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
-  tft.setTextColor(TFT_BLACK, TFT_YELLOW);
+  tft.setTextColor(TFT_WHITE, TFT_RED);
   tft.drawString("!", cx, cy + 4, 4);
   tft.setTextColor(TFT_RED, TFT_BLACK);
   tft.drawString("THROTTLE HIGH", (LCD_W + 68) / 2, cy - 12, 2);
