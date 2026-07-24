@@ -72,13 +72,18 @@ void backlightOn() {
 }
 
 // ---- Calibrated stick helpers (index: 0=T, 1=Y, 2=P, 3=R) ----
-// Piecewise around the stored center: min..mid -> 0..50%, mid..max -> 50..100%.
-// Keeps a resting stick at exactly 50% (1500 us) even with asymmetric pot travel.
+// Piecewise around the stored center: (min-M)..mid -> 0..50%, mid..(max+M) -> 50..100%.
+// A small margin M past the captured endpoints (min-5 = 0%, max+5 = 100%) gives a bit
+// of headroom so the physical extremes sit just inside the rails. Center is unchanged
+// (still (min+max)/2, which is also the midpoint of the padded range).
+constexpr int CAL_MARGIN = 5;
 float calPct(int idx, int raw) {
   if (!g_cal.valid || g_cal.max[idx] <= g_cal.min[idx]) {
     return constrain(raw, 0, 4095) * 100.0f / 4095.0f;  // uncalibrated fallback
   }
-  int lo = g_cal.min[idx], hi = g_cal.max[idx], mid = g_cal.mid[idx];
+  int lo = (int)g_cal.min[idx] - CAL_MARGIN;
+  int hi = (int)g_cal.max[idx] + CAL_MARGIN;
+  int mid = g_cal.mid[idx];
   if (mid <= lo || mid >= hi) mid = (lo + hi) / 2;  // sane fallback
   float p;
   if (raw <= mid) p = (raw - lo) * 50.0f / (mid - lo);
@@ -153,6 +158,9 @@ void calibrationWizard() {
   const char* const NAME[4] = {"THR", "YAW", "PIT", "ROL"};
   enum Zone : uint8_t { UNK, LO, HI };
 
+  uint16_t center[4] = {2048, 2048, 2048, 2048};
+
+  // ---- Phase 1: sweep for MIN/MAX ----
   tft.fillScreen(COL_BG);
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
@@ -224,10 +232,48 @@ void calibrationWizard() {
     vTaskDelay(pdMS_TO_TICKS(TICK_MS));
   }
 
+  // ---- Phase 2: capture the resting CENTER (after sweeping, sticks settle to rest) ----
+  {
+    tft.fillScreen(COL_BG);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextPadding(0);
+    tft.setTextColor(TFT_YELLOW, COL_BG);
+    tft.drawString("CENTER THE STICKS", LCD_W / 2, 12, 2);
+    tft.setTextColor(TFT_WHITE, COL_BG);
+    tft.drawString("leave at rest...", LCD_W / 2, 28, 1);
+    const int bx = 8, bw = LCD_W - 16, by = 58, bh = 12;
+    tft.drawRect(bx, by, bw, bh, TFT_DARKGREY);
+    const int HOLD_MS = 5000;
+    int last_sec = -1;
+    for (int t = 0; t < HOLD_MS; t += TICK_MS) {
+      GimbalState g;
+      gimbals_get(g);
+      center[0] = constrain(g.throttle, 0, 4095);
+      center[1] = constrain(g.yaw, 0, 4095);
+      center[2] = constrain(g.pitch, 0, 4095);
+      center[3] = constrain(g.roll, 0, 4095);
+      int fw = (bw - 2) * (HOLD_MS - t) / HOLD_MS;  // countdown
+      tft.fillRect(bx + 1, by + 1, fw, bh - 2, TFT_GREEN);
+      tft.fillRect(bx + 1 + fw, by + 1, bw - 2 - fw, bh - 2, COL_BG);
+      int sec = (HOLD_MS - t + 999) / 1000;  // seconds remaining
+      if (sec != last_sec) {
+        last_sec = sec;
+        char b[8];
+        snprintf(b, sizeof(b), "%ds", sec);
+        tft.setTextDatum(MC_DATUM);
+        tft.setTextPadding(tft.textWidth("00s", 4));
+        tft.setTextColor(TFT_GREEN, COL_BG);
+        tft.drawString(b, LCD_W / 2, 44, 4);
+      }
+      vTaskDelay(pdMS_TO_TICKS(TICK_MS));
+    }
+  }
+
   for (int i = 0; i < 4; ++i) {
     g_cal.min[i] = mn[i];
     g_cal.max[i] = mx[i];
-    g_cal.mid[i] = (uint16_t)((mn[i] + mx[i]) / 2);  // center from the endpoints
+    // Captured resting center, clamped just inside the swept range for a valid piecewise.
+    g_cal.mid[i] = (uint16_t)constrain((int)center[i], mn[i] + 1, mx[i] - 1);
   }
   g_cal.valid = true;
   bool saved = safeSaveCal(g_cal);  // quiesces gimbal + CRSF tasks around the NVS write
