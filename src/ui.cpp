@@ -1015,10 +1015,12 @@ void drawWifiSetup() {
   tft.drawString("MODULE WIFI SETUP", LCD_W / 2, 8, 1);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_WHITE, COL_BG);
-  tft.drawString("1. Power-cycle ELRS module", 6, 20, 1);
-  tft.drawString("2. WiFi: ExpressLRS TX", 6, 32, 1);
-  tft.drawString("   pw: expresslrs", 6, 44, 1);
-  tft.drawString("3. http://10.0.0.1", 6, 56, 1);
+  // Handset TX is silent in this mode; the module auto-starts WiFi after its
+  // "Auto On WiFi" interval IF it powers up seeing no CRSF (so power-cycle it now).
+  tft.drawString("1. Power-cycle module now", 6, 20, 1);
+  tft.drawString("2. Wait ~60s (TX stays silent)", 6, 32, 1);
+  tft.drawString("3. AP: ExpressLRS TX  pw:expresslrs", 6, 44, 1);
+  tft.drawString("4. http://10.0.0.1", 6, 56, 1);
   tft.setTextColor(TFT_YELLOW, COL_BG);
   tft.drawString("Toggle6 OFF = exit & fly", 6, 68, 1);
 }

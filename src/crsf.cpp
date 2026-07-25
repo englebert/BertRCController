@@ -25,6 +25,10 @@ constexpr uint8_t ADDR_RX = 0xEC;
 constexpr uint8_t TYPE_RC_CHANNELS = 0x16;      // our TX (echo -> ignore on RX)
 constexpr uint8_t TYPE_LINK_STATISTICS = 0x14;  // module telemetry we care about
 constexpr uint8_t TYPE_BATTERY_SENSOR = 0x08;   // FC pack V/I/mAh relayed up the link
+constexpr uint8_t TYPE_RADIO_ID = 0x3A;         // OpenTX sync (frequent — skip in probe log)
+constexpr uint8_t TYPE_DEVICE_PING = 0x28;      // probe: ask "who's on the bus?"
+constexpr uint8_t TYPE_DEVICE_INFO = 0x29;      // reply to ping: module name + param count
+constexpr uint8_t ADDR_BROADCAST = 0x00;
 
 // CRSF 11-bit channel range: 172=min, 992=center, 1811=max.
 constexpr uint16_t CRSF_MIN = 172;
@@ -39,6 +43,11 @@ CrsfLink g_link = {};
 uint16_t g_channels[16] = {0};  // last sent channel values, guarded by g_mux
 int g_arm_state = -1;  // -1 = no ARM toggle mapped, 0 = disarmed, 1 = armed (g_mux)
 uint32_t g_linkstats_ms = 0;  // millis() of the last link-stats frame (g_mux)
+// Diagnostic: ping the module + tally/log RX frame types to serial. Left off — testing
+// showed the module streams sync (0x3A) but never answers device pings (0x29) on this
+// half-duplex link, so the CRSF param/command path (incl. WiFi trigger) isn't available;
+// use the no-packets timeout instead. Flip to true to re-run the probe.
+bool g_probe = false;
 
 uint8_t crc8_dvb_s2(const uint8_t* data, int len) {
   uint8_t crc = 0;
@@ -134,6 +143,23 @@ void sendRcFrame() {
   uart.flush();  // wait for TX complete so the echo lands in the RX buffer
 }
 
+// Diagnostic: broadcast a CRSF device ping. A live ELRS module answers with a
+// device-info (0x29) frame — which is what the probe is checking for.
+void sendPing() {
+  uint8_t f[6];
+  f[0] = ADDR_MODULE;        // sync/addr, same as our RC frames
+  f[1] = 4;                  // len = type(1) + dest(1) + origin(1) + crc(1)
+  f[2] = TYPE_DEVICE_PING;
+  f[3] = ADDR_MODULE;        // dest: the TX module directly (0xEE)
+  f[4] = ADDR_RADIO;         // origin: us (the handset)
+  f[5] = crc8_dvb_s2(&f[2], 3);
+  uart.write(f, sizeof(f));
+  uart.flush();
+}
+
+// Probe frame-type tally (single-writer in the CRSF task; diagnostics only).
+uint16_t g_pc_sync = 0, g_pc_link = 0, g_pc_echo = 0, g_pc_info = 0, g_pc_other = 0;
+
 // --- Telemetry parser (fed all RX bytes; validates CRC; ignores our own echo).
 uint8_t rxbuf[64];
 int rxlen = 0;
@@ -170,6 +196,24 @@ void handleFrame(uint8_t type, const uint8_t* payload, int plen) {
     g_link.batt_valid = true;
   }
   portEXIT_CRITICAL(&g_mux);
+
+  // Probe: tally frame types (printed once/sec by the task) + dump interesting ones.
+  if (g_probe) {
+    if (type == TYPE_RADIO_ID) g_pc_sync++;
+    else if (type == TYPE_LINK_STATISTICS) g_pc_link++;
+    else if (type == TYPE_DEVICE_PING || type == TYPE_RC_CHANNELS) g_pc_echo++;
+    else if (type == TYPE_DEVICE_INFO) g_pc_info++;
+    else g_pc_other++;
+
+    if (type != TYPE_LINK_STATISTICS && type != TYPE_RADIO_ID &&
+        type != TYPE_DEVICE_PING && type != TYPE_RC_CHANNELS) {
+      Serial.printf("[probe] rx type=0x%02X len=%d:", type, plen);
+      for (int i = 0; i < plen && i < 24; ++i) Serial.printf(" %02X", payload[i]);
+      Serial.println();
+      if (type == TYPE_DEVICE_INFO && plen > 2)
+        Serial.printf("[probe] >>> DEVICE INFO — module name: '%s'\n", (const char*)&payload[2]);
+    }
+  }
 }
 
 void feed(uint8_t b) {
@@ -202,11 +246,21 @@ void feed(uint8_t b) {
 void crsfTask(void*) {
   const TickType_t period = pdMS_TO_TICKS(1000 / TX_RATE_HZ);  // 2 ms @ 500 Hz
   TickType_t last = xTaskGetTickCount();
+  uint32_t frameCnt = 0;
   for (;;) {
     sendRcFrame();
     portENTER_CRITICAL(&g_mux);
     g_link.tx_frames++;
     portEXIT_CRITICAL(&g_mux);
+
+    // Probe: once a second, ping the module and report the RX frame-type tally so we can
+    // tell a real module reply (info) from just our own echo / normal telemetry.
+    if (g_probe && (++frameCnt % TX_RATE_HZ == 0)) {
+      sendPing();
+      Serial.printf("[probe] 1s tally  sync=%u link=%u echo=%u INFO=%u other=%u\n", g_pc_sync,
+                    g_pc_link, g_pc_echo, g_pc_info, g_pc_other);
+      g_pc_sync = g_pc_link = g_pc_echo = g_pc_info = g_pc_other = 0;
+    }
 
     // Drain everything the module (and our echo) put on the wire.
     while (uart.available()) feed((uint8_t)uart.read());
