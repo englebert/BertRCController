@@ -84,6 +84,14 @@ UART0 pins 1/3 · display MISO (panel is write-only).
   frames (or flush RX after each TX). This is the most likely failure mode in this design.
 - Telemetry (LQ, RSSI, link stats) returns on the same wire → feed to the UI task
 - Channels: 11-bit packed CRSF, 16 available, **14 used** (4 gimbals + 10 switches)
+- **Module WiFi mode:** triggered ONLY by the no-CRSF timeout — power-cycle the module
+  while the handset sends zero CRSF, and it auto-starts WiFi after its "Auto On WiFi"
+  interval (~60 s; must be enabled, not -1, in the ExpressLRS Configurator/Web UI). There
+  is **no CRSF command path**: this module streams sync (0x3A) but never answers device
+  pings (0x28→0x29) over the half-duplex wire, so the ELRS parameter/Lua handshake (and
+  thus any command-based WiFi/config trigger) is a proven dead end here. Verified with the
+  dormant ping probe in `crsf.cpp` (`g_probe`). `MODULE WIFI SETUP` mode just skips
+  `crsf_start()` so GPIO17 stays idle; AP = `ExpressLRS TX`, pw `expresslrs`, http://10.0.0.1.
 
 ### I2C0 — `Wire`, SDA=21, SCL=22, 400 kHz
 Single 4.7k pull-up pair for the whole bus (remove per-module pull-ups).
