@@ -66,6 +66,43 @@ bool safeSaveGconfig() {  // persists flip + toggle map
   return ok;
 }
 
+bool safeAddFlight(uint32_t secs) {  // accumulate armed time into NVS total
+  crsf_pause();
+  gimbals_pause();
+  switches_pause();
+  storage_add_flight_secs(secs);
+  switches_resume();
+  gimbals_resume();
+  crsf_resume();
+  return true;
+}
+
+// ---- Flight timer ----
+// Session runs while the ARM-mapped toggle is ON (crsf_arm_state()==1). State lives at
+// this scope so it survives RC<->config mode switches; flightTimerTick() is polled from
+// both loops. On disarm the completed session is banked into the NVS total.
+bool g_fltArmed = false;
+uint32_t g_fltStartMs = 0;
+uint32_t g_fltSessS = 0;  // current session seconds (0 when disarmed)
+
+void flightTimerTick() {
+  bool armed = (crsf_arm_state() == 1);
+  uint32_t now = millis();
+  if (armed && !g_fltArmed) {  // just armed
+    g_fltStartMs = now;
+    g_fltSessS = 0;
+  } else if (armed) {  // still armed
+    g_fltSessS = (now - g_fltStartMs) / 1000;
+  } else if (g_fltArmed) {  // just disarmed: bank the session
+    uint32_t secs = (now - g_fltStartMs) / 1000;
+    if (secs > 0) safeAddFlight(secs);
+    g_fltSessS = 0;
+  }
+  g_fltArmed = armed;
+}
+
+uint32_t flightTimerSession() { return g_fltSessS; }
+
 void backlightOn() {
   ledcAttach(PIN_TFT_BL, BL_PWM_FREQ, BL_PWM_BITS);  // arduino-esp32 3.x API
   ledcWrite(PIN_TFT_BL, BL_FULL);
@@ -371,11 +408,20 @@ void renderRc() {
   else snprintf(b, sizeof(b), "--%%");
   tft.drawString(b, LCD_W / 2, 30, 4);
 
-  tft.setTextPadding(100);
+  // Bottom row: voltage (left) + flight-session MM:SS (right, white while armed).
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextPadding(90);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   if (ok) snprintf(b, sizeof(b), "%.2f V", pr.voltage_V);
   else snprintf(b, sizeof(b), "-- V");
-  tft.drawString(b, LCD_W / 2, 58, 2);
+  tft.drawString(b, 4, 58, 2);
+
+  uint32_t s = flightTimerSession();
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextPadding(70);
+  tft.setTextColor(g_fltArmed ? TFT_WHITE : TFT_DARKGREY, TFT_BLACK);
+  snprintf(b, sizeof(b), "%02lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
+  tft.drawString(b, LCD_W - 4, 58, 2);
 }
 
 // ---- Config-mode menu system ----
@@ -565,6 +611,15 @@ void drawBatteryStatic() {
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(TFT_DARKGREY, COL_BG);
   tft.drawString("CXL=back", LCD_W - 4, 6, 1);
+
+  // Lifetime total flight time (accumulated armed seconds from NVS), below the icon.
+  uint32_t tot = storage_get_total_flight_secs();
+  char b[28];
+  snprintf(b, sizeof(b), "TOTAL FLIGHT %luh%02lum", (unsigned long)(tot / 3600),
+           (unsigned long)((tot % 3600) / 60));
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  tft.drawString(b, 4, 70, 1);
 }
 
 // Redraw only what changed (force = redraw all, e.g. on page entry) to avoid the
@@ -822,6 +877,7 @@ void configLoop() {
   const TickType_t period = pdMS_TO_TICKS(50);
 
   while (toggleOn(TOGGLE6_BIT)) {
+    flightTimerTick();  // keep banking flight time if armed while in config mode
     RawKeys r = readRawKeys();
     bool up = ku.poll(r.up), dn = kd.poll(r.down), ok = kok.poll(r.ok),
          cx = kcx.poll(r.cancel);
@@ -1094,6 +1150,7 @@ void rcLoop() {
   drawRcStatic();
   const TickType_t period = pdMS_TO_TICKS(200);  // ~5 Hz
   while (!toggleOn(TOGGLE6_BIT)) {
+    flightTimerTick();
     renderRc();
     vTaskDelay(period);
   }
