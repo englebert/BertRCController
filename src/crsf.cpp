@@ -64,14 +64,6 @@ void packChannels(const uint16_t ch[16], uint8_t out[22]) {
   }
 }
 
-// idx: 0=T,1=Y,2=P,3=R (for the per-channel reverse/flip flag).
-uint16_t adcToCrsf(int16_t adc, int idx) {
-  int v = constrain((int)adc, 0, 4095);
-  uint16_t out = (uint16_t)(CRSF_MIN + (long)v * (CRSF_MAX - CRSF_MIN) / 4095);
-  if (gconfig_flip(idx)) out = (uint16_t)(CRSF_MIN + CRSF_MAX - out);  // reverse
-  return out;
-}
-
 // Toggle -> MCP23017 bit map (A0-A7 = bits 0-7, B0-B7 = bits 8-15).
 // Index i = Toggle(i+1) and drives channel CH(5+i). 2-position for now.
 constexpr uint8_t TOGGLE_BIT[10] = {
@@ -93,11 +85,12 @@ void buildChannels(uint16_t ch[16]) {
   SwitchState sw;
   switches_get(sw);
 
-  // AETR: CH1=Roll, CH2=Pitch, CH3=Throttle, CH4=Yaw.
-  ch[0] = adcToCrsf(g.roll, 3);
-  ch[1] = adcToCrsf(g.pitch, 2);
-  ch[2] = adcToCrsf(g.throttle, 0);
-  ch[3] = adcToCrsf(g.yaw, 1);
+  // AETR: CH1=Roll, CH2=Pitch, CH3=Throttle, CH4=Yaw. Calibrated (min/center/max) +
+  // flip-aware map, matching the UI's stick %.
+  ch[0] = gconfig_map_crsf(3, g.roll);
+  ch[1] = gconfig_map_crsf(2, g.pitch);
+  ch[2] = gconfig_map_crsf(0, g.throttle);
+  ch[3] = gconfig_map_crsf(1, g.yaw);
 
   // CH5..CH16 default to center, then each toggle drives its assigned channel
   // (configurable in the Toggle Mapping menu; Toggle6 is reserved for menu mode).
@@ -108,12 +101,12 @@ void buildChannels(uint16_t ch[16]) {
     ch[chan - 1] = (sw.bits & (1u << TOGGLE_BIT[i])) ? CRSF_MAX : CRSF_MIN;
   }
 
-  // Arm safety: hold throttle at idle until the ARM-mapped toggle is ON. If no toggle
-  // has the ARM function, throttle passes through (unconfigured). A disarmed or
-  // not-yet-valid switch read forces the throttle stick to virtual zero (flip-aware).
+  // Arm state for the UI banner + flight timer only. The throttle is NOT gated: the real
+  // stick value is always sent (built above). Motor safety is the flight controller's job
+  // via the ARM channel (the ARM toggle's mapped channel) — the FC won't spin motors while
+  // disarmed regardless of throttle. If no toggle has the ARM function, state = unconfigured.
   int armT = gconfig_toggle_with_func(GFUNC_ARM);
   bool armed = (armT < 0) ? true : (sw.bits & (1u << TOGGLE_BIT[armT])) != 0;
-  if (!armed) ch[2] = adcToCrsf(0, 0);  // CH3 = throttle
 
   portENTER_CRITICAL(&g_mux);
   g_arm_state = (armT < 0) ? -1 : (armed ? 1 : 0);

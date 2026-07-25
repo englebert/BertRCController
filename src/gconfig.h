@@ -8,13 +8,24 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-// Load flip flags + toggle map from NVS into the runtime cache. Call once at startup
-// after storage_init() and before CRSF/UI use them.
+#include "storage.h"  // GimbalCal
+
+// Load flip flags + toggle map + calibration from NVS into the runtime cache. Call once
+// at startup after storage_init() and before CRSF/UI use them.
 void gconfig_init();
 
 // --- Gimbal reverse (flip) ---
 bool gconfig_flip(int idx);            // thread-safe read (CRSF task, frame rate)
 void gconfig_set_flip(int idx, bool v);  // update cache; persist with gconfig_save()
+
+// --- Gimbal calibration (raw ADC -> CRSF mapping) ---
+// Update the cached calibration (call after the calibration wizard). The wizard persists
+// the cal to NVS itself; this just refreshes the copy the CRSF task maps against.
+void gconfig_set_cal(const GimbalCal& cal);
+// Map a filtered raw ADC value (0..4095) for gimbal idx (0=T,1=Y,2=P,3=R) to a CRSF value
+// (172..1811) using the calibrated endpoints (min/center/max) + the channel reverse flag.
+// Falls back to a linear map when no valid calibration is loaded. Matches the UI's calPct.
+uint16_t gconfig_map_crsf(int idx, int raw);
 
 // --- Toggle -> CRSF channel map. Value = channel 5..16, 0 = unassigned ---
 uint8_t gconfig_toggle_chan(int toggle);          // read (CRSF task)

@@ -1212,6 +1212,7 @@ void appTask(void*) {
   } else {
     Serial.println("[cal] loaded from NVS");
   }
+  gconfig_set_cal(g_cal);  // ensure CRSF maps against the just-loaded/captured calibration
 
   throttleGate();  // block while throttle > 15%
 
