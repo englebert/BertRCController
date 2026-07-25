@@ -16,6 +16,7 @@ constexpr const char* KEY_TMAP = "tmap";
 constexpr const char* KEY_TFUNC = "tfunc";
 constexpr const char* KEY_WIFI_BOOT = "wifiboot";
 constexpr const char* KEY_TOTAL_FLIGHT = "tflight";
+constexpr const char* KEY_TELEM_SEL = "telemsel";
 
 }  // namespace
 
@@ -94,6 +95,15 @@ bool storage_get_wifi_boot() {
 
 void storage_set_wifi_boot(bool v) {
   if (g_open) prefs.putBool(KEY_WIFI_BOOT, v);
+}
+
+uint16_t storage_get_telem_sel() {
+  if (!g_open) return 0;
+  return prefs.getUShort(KEY_TELEM_SEL, 0);
+}
+
+void storage_set_telem_sel(uint16_t v) {
+  if (g_open) prefs.putUShort(KEY_TELEM_SEL, v);
 }
 
 uint32_t storage_get_total_flight_secs() {

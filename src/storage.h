@@ -43,6 +43,10 @@ bool storage_save_toggle_funcs(const uint8_t in[10]);
 bool storage_get_wifi_boot();
 void storage_set_wifi_boot(bool v);
 
+// Bitmask of telemetry items shown on the main RC screen (bit i = item i). Default 0.
+uint16_t storage_get_telem_sel();
+void storage_set_telem_sel(uint16_t v);
+
 // Total accumulated flight time (persisted). Used by Phase 2.
 uint32_t storage_get_total_flight_secs();
 void storage_add_flight_secs(uint32_t secs);

@@ -66,6 +66,17 @@ bool safeSaveGconfig() {  // persists flip + toggle map
   return ok;
 }
 
+bool safeSaveTelemSel(uint16_t sel) {  // persist main-screen telemetry selection
+  crsf_pause();
+  gimbals_pause();
+  switches_pause();
+  storage_set_telem_sel(sel);
+  switches_resume();
+  gimbals_resume();
+  crsf_resume();
+  return true;
+}
+
 bool safeAddFlight(uint32_t secs) {  // accumulate armed time into NVS total
   crsf_pause();
   gimbals_pause();
@@ -378,6 +389,66 @@ int batteryPct(float v) {
   return (int)constrain(p, 0.0f, 100.0f);
 }
 
+// ---- Telemetry items (CRSF link statistics) ----
+struct TeleItem {
+  const char* name;
+};
+const TeleItem TELE_ITEMS[] = {
+    {"UPLINK LQ"}, {"UPLINK RSSI"}, {"UPLINK SNR"}, {"DOWN LQ"},
+    {"DOWN RSSI"}, {"DOWN SNR"},    {"TX POWER"},   {"RF MODE"},
+};
+constexpr int TELE_N = 8;
+
+uint16_t g_telemSel = 0;  // bitmask of items shown on the main RC screen (bit i = item i)
+
+// Full value string for item i, e.g. "100%", "-45 dBm", "25 mW"; "--" when no telemetry.
+void teleValue(int i, const CrsfLink& l, bool ok, char* b, size_t n) {
+  if (!ok) {
+    snprintf(b, n, "--");
+    return;
+  }
+  switch (i) {
+    case 0: snprintf(b, n, "%u%%", l.up_lq); break;
+    case 1: snprintf(b, n, "%d dBm", l.up_rssi); break;
+    case 2: snprintf(b, n, "%d dB", l.up_snr); break;
+    case 3: snprintf(b, n, "%u%%", l.dn_lq); break;
+    case 4: snprintf(b, n, "%d dBm", l.dn_rssi); break;
+    case 5: snprintf(b, n, "%d dB", l.dn_snr); break;
+    case 6: snprintf(b, n, "%u mW", crsf_tx_power_mw(l.tx_power)); break;
+    case 7: snprintf(b, n, "%u", l.rf_mode); break;
+    default: snprintf(b, n, "--"); break;
+  }
+}
+
+// Compact form for the main-screen strip, e.g. "LQ100", "R-45", "25mW".
+void teleShort(int i, const CrsfLink& l, char* b, size_t n) {
+  switch (i) {
+    case 0: snprintf(b, n, "LQ%u", l.up_lq); break;
+    case 1: snprintf(b, n, "R%d", l.up_rssi); break;
+    case 2: snprintf(b, n, "SNR%d", l.up_snr); break;
+    case 3: snprintf(b, n, "dLQ%u", l.dn_lq); break;
+    case 4: snprintf(b, n, "dR%d", l.dn_rssi); break;
+    case 5: snprintf(b, n, "dSNR%d", l.dn_snr); break;
+    case 6: snprintf(b, n, "%umW", crsf_tx_power_mw(l.tx_power)); break;
+    case 7: snprintf(b, n, "M%u", l.rf_mode); break;
+    default: b[0] = 0; break;
+  }
+}
+
+// Space-joined strip of the selected items (in item order) into out.
+void buildTeleStrip(char* out, size_t n, const CrsfLink& l) {
+  out[0] = 0;
+  size_t len = 0;
+  for (int i = 0; i < TELE_N && len < n - 1; ++i) {
+    if (!(g_telemSel & (1u << i))) continue;
+    char part[16];
+    teleShort(i, l, part, sizeof(part));
+    int w = snprintf(out + len, n - len, "%s%s", len ? " " : "", part);
+    if (w < 0) break;
+    len += (size_t)w;
+  }
+}
+
 void drawRcStatic() {
   tft.fillScreen(COL_BG);
   tft.setTextDatum(ML_DATUM);
@@ -406,22 +477,48 @@ void renderRc() {
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
   if (ok) snprintf(b, sizeof(b), "%d%%", batteryPct(pr.voltage_V));
   else snprintf(b, sizeof(b), "--%%");
-  tft.drawString(b, LCD_W / 2, 30, 4);
+  tft.drawString(b, LCD_W / 2, 28, 4);
 
-  // Bottom row: voltage (left) + flight-session MM:SS (right, white while armed).
+  // Voltage (left) + flight-session MM:SS (right, white while armed).
   tft.setTextDatum(ML_DATUM);
   tft.setTextPadding(90);
   tft.setTextColor(TFT_CYAN, TFT_BLACK);
   if (ok) snprintf(b, sizeof(b), "%.2f V", pr.voltage_V);
   else snprintf(b, sizeof(b), "-- V");
-  tft.drawString(b, 4, 58, 2);
+  tft.drawString(b, 4, 50, 2);
 
   uint32_t s = flightTimerSession();
   tft.setTextDatum(MR_DATUM);
   tft.setTextPadding(70);
   tft.setTextColor(g_fltArmed ? TFT_WHITE : TFT_DARKGREY, TFT_BLACK);
   snprintf(b, sizeof(b), "%02lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
-  tft.drawString(b, LCD_W - 4, 58, 2);
+  tft.drawString(b, LCD_W - 4, 50, 2);
+
+  // Bottom telemetry strip: selected items, blitted from a sprite so it never flashes.
+  // Green while telemetry is live; RED (stale values, or "NO TELEMETRY") when offline.
+  CrsfLink l;
+  bool ever = crsf_get(l);            // have we ever received link stats?
+  bool online = crsf_telem_online();  // ...and is it still fresh?
+  char strip[64];
+  buildTeleStrip(strip, sizeof(strip), l);
+  TFT_eSprite spr(&tft);
+  spr.createSprite(LCD_W, 12);
+  spr.fillSprite(TFT_BLACK);
+  spr.setTextFont(1);  // clears the inherited garbage gfxFont — else font-1 text crashes
+  spr.setTextSize(1);
+  spr.setTextDatum(ML_DATUM);
+  spr.setTextPadding(0);
+  if (g_telemSel == 0) {
+    // nothing selected — leave the strip blank
+  } else if (online) {
+    spr.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
+    spr.drawString(strip, 2, 6, 1);
+  } else {
+    spr.setTextColor(TFT_RED, TFT_BLACK);
+    spr.drawString(ever ? strip : "NO TELEMETRY", 2, 6, 1);
+  }
+  spr.pushSprite(0, 64);
+  spr.deleteSprite();
 }
 
 // ---- Config-mode menu system ----
@@ -430,8 +527,8 @@ void renderRc() {
 bool toggleOn(int bit);  // fwd decl (defined below)
 
 const char* const MENU_ITEMS[] = {"GIMBALS & TRIM", "TOGGLE MAPPING", "BATTERY INFO",
-                                   "CRSF MODULE", "REBOOT"};
-constexpr int MENU_N = 5;
+                                   "TELEMETRY", "CRSF MODULE", "REBOOT"};
+constexpr int MENU_N = 6;
 
 struct RawKeys {
   bool up, down, ok, cancel;
@@ -492,6 +589,8 @@ void drawMenuRow(int slot, int idx, bool sel) {
   uint16_t bg = sel ? TFT_NAVY : COL_BG;
   TFT_eSprite spr(&tft);
   spr.createSprite(LCD_W, LIST_ROW_H);
+  spr.setTextFont(1);  // init inherited text state (gfxFont/size are garbage in a new sprite)
+  spr.setTextSize(1);
   spr.fillSprite(bg);
   if (idx >= 0 && idx < MENU_N) {
     spr.setTextDatum(ML_DATUM);
@@ -510,6 +609,59 @@ void drawMenuListFull(int scroll, int sel) {
     int idx = scroll + s;
     drawMenuRow(s, idx, idx == sel);
   }
+}
+
+// --- Menu item: Telemetry — live CRSF link stats; OK toggles "show on main screen". ---
+void drawTeleHeader() {
+  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("TELEMETRY", 4, 5, 1);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  tft.drawString("OK:main  CXL:back", LCD_W - 4, 5, 1);
+}
+
+// One telemetry row: selection bullet + name (left) + live value (right). Sprite blit.
+void drawTeleRow(int slot, int item, bool cursor, const CrsfLink& l, bool lok) {
+  int y = LIST_ROW_Y0 + slot * LIST_ROW_H;
+  uint16_t bg = cursor ? TFT_NAVY : COL_BG;
+  TFT_eSprite spr(&tft);
+  spr.createSprite(LCD_W, LIST_ROW_H);
+  spr.setTextFont(1);  // init inherited text state (gfxFont/size are garbage in a new sprite)
+  spr.setTextSize(1);
+  spr.fillSprite(bg);
+  if (item >= 0 && item < TELE_N) {
+    int cy = LIST_ROW_H / 2;
+    bool on = g_telemSel & (1u << item);
+    // selection bullet: filled yellow = shown on main; hollow grey = not.
+    if (on) spr.fillCircle(9, cy, 4, TFT_YELLOW);
+    else spr.drawCircle(9, cy, 4, TFT_DARKGREY);
+    spr.setTextDatum(ML_DATUM);
+    spr.setTextPadding(0);
+    spr.setTextColor(TFT_WHITE, bg);
+    spr.drawString(TELE_ITEMS[item].name, 22, cy, 2);
+    char v[16];
+    teleValue(item, l, lok, v, sizeof(v));
+    spr.setTextDatum(MR_DATUM);
+    spr.setTextColor(lok ? TFT_CYAN : TFT_DARKGREY, bg);
+    spr.drawString(v, LCD_W - 6, cy, 2);
+  }
+  spr.pushSprite(0, y - LIST_ROW_H / 2);
+  spr.deleteSprite();
+}
+
+void drawTeleVisible(int scroll, int cursor, const CrsfLink& l, bool lok) {
+  for (int s = 0; s < LIST_VISIBLE; ++s) {
+    int item = scroll + s;
+    drawTeleRow(s, item, item == cursor, l, lok);
+  }
+}
+
+void drawTeleFull(int scroll, int cursor, const CrsfLink& l, bool lok) {
+  drawTeleHeader();
+  drawTeleVisible(scroll, cursor, l, lok);
 }
 
 // --- Menu item 1: Gimbals position + channel reverse (flip).
@@ -714,6 +866,8 @@ void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field) {
   uint16_t bg = sel ? TFT_NAVY : COL_BG;
   TFT_eSprite spr(&tft);
   spr.createSprite(LCD_W, TM_ROW_H);
+  spr.setTextFont(1);  // init inherited text state (gfxFont/size are garbage in a new sprite)
+  spr.setTextSize(1);
   spr.fillSprite(bg);
   if (eidx >= 0 && eidx < EDIT_TOGGLE_N) {
     int t = EDIT_TOGGLE[eidx];
@@ -860,7 +1014,7 @@ void drawWifiSetup() {
 
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
 void configLoop() {
-  enum class Page : uint8_t { List, Gimbals, Toggles, Battery, Crsf, Reboot };
+  enum class Page : uint8_t { List, Gimbals, Toggles, Battery, Telemetry, Crsf, Reboot };
   Page page = Page::List;
   int sel = 0;
   int menu_scroll = 0;  // index of the top visible main-menu row
@@ -871,6 +1025,9 @@ void configLoop() {
   int tm_field = 0;         // 0 = channel, 1 = function (which field OK cycles)
   uint8_t tm_prevchan = 0;  // channel before entering edit (for CANCEL revert)
   uint8_t tm_prevfunc = 0;  // function before entering edit (for CANCEL revert)
+  int te_cursor = 0;   // selected telemetry item
+  int te_scroll = 0;   // top visible telemetry row
+  int te_tick = 0;     // throttles live value refresh
   bool crsf_confirm = false;  // CRSF page: WiFi-setup confirm dialog
   bool redraw = true;
   EdgeKey ku, kd, kok, kcx;
@@ -1049,6 +1206,41 @@ void configLoop() {
         }
         break;
       }
+      case Page::Telemetry: {
+        CrsfLink l;
+        bool lok = crsf_get(l);
+        if (redraw) {
+          if (te_cursor < te_scroll) te_scroll = te_cursor;
+          if (te_cursor >= te_scroll + LIST_VISIBLE) te_scroll = te_cursor - LIST_VISIBLE + 1;
+          drawTeleFull(te_scroll, te_cursor, l, lok);
+          redraw = false;
+          te_tick = 0;
+        }
+        if (up && te_cursor > 0) {
+          te_cursor--;
+          if (te_cursor < te_scroll) te_scroll = te_cursor;
+          drawTeleVisible(te_scroll, te_cursor, l, lok);
+        }
+        if (dn && te_cursor < TELE_N - 1) {
+          te_cursor++;
+          if (te_cursor >= te_scroll + LIST_VISIBLE) te_scroll = te_cursor - LIST_VISIBLE + 1;
+          drawTeleVisible(te_scroll, te_cursor, l, lok);
+        }
+        if (ok) {  // toggle "show on main screen" and persist
+          g_telemSel ^= (uint16_t)(1u << te_cursor);
+          safeSaveTelemSel(g_telemSel);
+          drawTeleVisible(te_scroll, te_cursor, l, lok);
+        }
+        if (++te_tick >= 4) {  // ~5 Hz live value refresh
+          te_tick = 0;
+          drawTeleVisible(te_scroll, te_cursor, l, lok);
+        }
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        break;
+      }
       case Page::Reboot:
         if (redraw) {
           drawRebootConfirm();
@@ -1169,6 +1361,7 @@ void appTask(void*) {
   // busy ISR during a flash-cache-disabled window panics the chip.
   storage_init();
   gconfig_init();  // load per-channel flip flags (default none) before CRSF uses them
+  g_telemSel = storage_get_telem_sel();  // which telemetry items show on the RC screen
 
   tft.init();
   tft.setRotation(PANEL_ROTATION);
@@ -1222,7 +1415,9 @@ void appTask(void*) {
 }  // namespace
 
 bool ui_start() {
-  BaseType_t ok = xTaskCreatePinnedToCore(appTask, "app", 6144, nullptr,
+  // 10 KB stack: TFT_eSPI sprite text rendering + float formatting in renderRc need
+  // well more than the old 6 KB (a deep drawString there overflowed it -> LoadStoreError).
+  BaseType_t ok = xTaskCreatePinnedToCore(appTask, "app", 10240, nullptr,
                                           /*priority=*/1, nullptr, /*core=*/0);
   return ok == pdPASS;
 }

@@ -34,9 +34,10 @@ HardwareSerial& uart = Serial2;
 TaskHandle_t g_task = nullptr;
 
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
-CrsfLink g_link = {false, 0, 0, 0, 0, 0};
+CrsfLink g_link = {};
 uint16_t g_channels[16] = {0};  // last sent channel values, guarded by g_mux
 int g_arm_state = -1;  // -1 = no ARM toggle mapped, 0 = disarmed, 1 = armed (g_mux)
+uint32_t g_linkstats_ms = 0;  // millis() of the last link-stats frame (g_mux)
 
 uint8_t crc8_dvb_s2(const uint8_t* data, int len) {
   uint8_t crc = 0;
@@ -146,10 +147,19 @@ void handleFrame(uint8_t type, const uint8_t* payload, int plen) {
   portENTER_CRITICAL(&g_mux);
   g_link.rx_frames++;
   if (type == TYPE_LINK_STATISTICS && plen >= 10) {
+    // CRSF LinkStatistics: [0]up RSSI ant1 [1]ant2 [2]up LQ [3]up SNR [4]active ant
+    // [5]RF mode [6]up TX power idx [7]dn RSSI [8]dn LQ [9]dn SNR.
     g_link.up_rssi = -(int16_t)payload[0];  // uplink RSSI (dBm)
     g_link.up_lq = payload[2];              // uplink link quality (%)
+    g_link.up_snr = (int8_t)payload[3];
+    g_link.ant = payload[4];
     g_link.rf_mode = payload[5];
+    g_link.tx_power = payload[6];
+    g_link.dn_rssi = -(int16_t)payload[7];
+    g_link.dn_lq = payload[8];
+    g_link.dn_snr = (int8_t)payload[9];
     g_link.valid = true;
+    g_linkstats_ms = millis();
   }
   portEXIT_CRITICAL(&g_mux);
 }
@@ -232,6 +242,21 @@ int crsf_arm_state() {
   int s = g_arm_state;
   portEXIT_CRITICAL(&g_mux);
   return s;
+}
+
+bool crsf_telem_online() {
+  portENTER_CRITICAL(&g_mux);
+  bool v = g_link.valid;
+  uint32_t t = g_linkstats_ms;
+  portEXIT_CRITICAL(&g_mux);
+  if (!v) return false;                 // never received link stats
+  return (millis() - t) < 1000;         // stale after 1 s without a link-stats frame
+}
+
+uint16_t crsf_tx_power_mw(uint8_t idx) {
+  // Standard CRSF power-index table.
+  static const uint16_t P[] = {0, 10, 25, 100, 500, 1000, 2000, 250, 50};
+  return idx < (sizeof(P) / sizeof(P[0])) ? P[idx] : 0;
 }
 
 

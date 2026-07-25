@@ -15,7 +15,20 @@ struct CrsfLink {
   uint8_t up_lq;       // uplink link quality (0..100), from link-stats frame
   int16_t up_rssi;     // uplink RSSI in dBm (negative)
   uint8_t rf_mode;     // reported RF mode index
+  int8_t up_snr;       // uplink SNR (dB)
+  uint8_t dn_lq;       // downlink link quality (0..100)
+  int16_t dn_rssi;     // downlink RSSI in dBm (negative)
+  int8_t dn_snr;       // downlink SNR (dB)
+  uint8_t tx_power;    // uplink TX power index (map with crsf_tx_power_mw)
+  uint8_t ant;         // active antenna
 };
+
+// Map the CRSF TX-power index to milliwatts (0 for unknown index).
+uint16_t crsf_tx_power_mw(uint8_t idx);
+
+// True while link-stats telemetry is fresh (a link-stats frame within the last ~1 s);
+// false when telemetry has never arrived or has gone stale (link/module offline).
+bool crsf_telem_online();
 
 // Init UART2 + start the CRSF task. Call once from setup().
 bool crsf_start();
