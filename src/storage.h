@@ -34,6 +34,10 @@ bool storage_save_flip(const bool in[4]);
 bool storage_load_toggles(uint8_t out[10]);
 bool storage_save_toggles(const uint8_t in[10]);
 
+// Toggle -> function label map (index into the UI's function name list; 0 = none).
+bool storage_load_toggle_funcs(uint8_t out[10]);
+bool storage_save_toggle_funcs(const uint8_t in[10]);
+
 // "Boot into module-WiFi-setup" flag: when set, the app boots without starting CRSF
 // so the ELRS module (seeing no handset) enters its WiFi config mode.
 bool storage_get_wifi_boot();

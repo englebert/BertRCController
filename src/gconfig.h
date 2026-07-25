@@ -20,6 +20,12 @@ void gconfig_set_flip(int idx, bool v);  // update cache; persist with gconfig_s
 uint8_t gconfig_toggle_chan(int toggle);          // read (CRSF task)
 void gconfig_set_toggle_chan(int toggle, uint8_t ch);  // update cache
 
+// --- Toggle -> function label. Value = index into the UI function list, 0 = none ---
+uint8_t gconfig_toggle_func(int toggle);
+void gconfig_set_toggle_func(int toggle, uint8_t f);
+// First toggle assigned the given function index, or -1 if none (e.g. find the ARM toggle).
+int gconfig_toggle_with_func(uint8_t f);
+
 // Persist the whole config (flip + toggle map) to NVS. Caller must quiesce ADC/CRSF
 // around this (flash write) as with other NVS saves.
 bool gconfig_save();

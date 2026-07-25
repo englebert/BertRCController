@@ -413,24 +413,47 @@ struct EdgeKey {
   }
 };
 
-// Draw a single menu row (clears just its own area — no full-screen blank).
-void drawMenuItem(int i, bool sel) {
-  int y = 16 + i * 12;
-  uint16_t bg = sel ? TFT_NAVY : COL_BG;
-  tft.fillRect(0, y - 6, LCD_W, 12, bg);  // clear only this row
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextPadding(0);
-  tft.setTextColor(sel ? TFT_WHITE : TFT_DARKGREY, bg);
-  tft.drawString(MENU_ITEMS[i], 8, y, 1);
-}
+// Shared scrolling-list geometry: 4 rows visible at font 2 (16px) on the 76px panel.
+constexpr int LIST_VISIBLE = 4;
+constexpr int LIST_ROW_H = 16;
+constexpr int LIST_ROW_Y0 = 20;  // center-y of the first visible row (below header)
 
-void drawMenuListFull(int sel) {
-  tft.fillScreen(COL_BG);
+void drawMenuHeader() {
+  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
   tft.setTextDatum(ML_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_YELLOW, COL_BG);
   tft.drawString("CONFIG", 4, 5, 1);
-  for (int i = 0; i < MENU_N; ++i) drawMenuItem(i, i == sel);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  tft.drawString("OK:enter  CXL:exit", LCD_W - 4, 5, 1);
+}
+
+// Draw one visible menu row into an off-screen sprite and blit it once (no flash).
+// slot = visual position 0..LIST_VISIBLE-1; idx = menu item index (or out of range = blank).
+void drawMenuRow(int slot, int idx, bool sel) {
+  int y = LIST_ROW_Y0 + slot * LIST_ROW_H;
+  uint16_t bg = sel ? TFT_NAVY : COL_BG;
+  TFT_eSprite spr(&tft);
+  spr.createSprite(LCD_W, LIST_ROW_H);
+  spr.fillSprite(bg);
+  if (idx >= 0 && idx < MENU_N) {
+    spr.setTextDatum(ML_DATUM);
+    spr.setTextPadding(0);
+    spr.setTextColor(sel ? TFT_WHITE : TFT_DARKGREY, bg);
+    spr.drawString(MENU_ITEMS[idx], 8, LIST_ROW_H / 2, 2);
+  }
+  spr.pushSprite(0, y - LIST_ROW_H / 2);
+  spr.deleteSprite();
+}
+
+void drawMenuListFull(int scroll, int sel) {
+  // Header + 4 sprite rows cover the panel, so no fillScreen (which would flash).
+  drawMenuHeader();
+  for (int s = 0; s < LIST_VISIBLE; ++s) {
+    int idx = scroll + s;
+    drawMenuRow(s, idx, idx == sel);
+  }
 }
 
 // --- Menu item 1: Gimbals position + channel reverse (flip).
@@ -586,49 +609,81 @@ void drawBatteryDynamic(bool force) {
   }
 }
 
-// --- Menu item 2: Toggle -> CRSF channel mapping (Toggle6 reserved for menu mode).
+// --- Menu item 2: Toggle -> CRSF channel + function (Toggle6 reserved for menu mode).
 const int EDIT_TOGGLE[9] = {0, 1, 2, 3, 4, 6, 7, 8, 9};  // toggle indices, skip Toggle6
 constexpr int EDIT_TOGGLE_N = 9;
 
-void drawToggleHeader(bool editing) {
+// Function labels a toggle can be assigned (index stored in gconfig). ARM is special
+// (drives arm-safety + flight timer); the rest are labels the flight controller acts on.
+const char* const FUNC_NAMES[] = {"-",   "ARM", "ANGLE", "HORIZ", "ACRO",
+                                  "AIR", "TURTLE", "RTH", "BEEP", "PREARM"};
+constexpr int FUNC_COUNT = 10;
+constexpr uint8_t FUNC_ARM = 1;
+
+// Scrolling list geometry (shares the main-menu list geometry).
+constexpr int TM_VISIBLE = LIST_VISIBLE;
+constexpr int TM_ROW_H = LIST_ROW_H;
+constexpr int TM_ROW_Y0 = LIST_ROW_Y0;
+
+void drawToggleHeader(bool editing, int field) {
   tft.fillRect(0, 0, LCD_W, 12, COL_BG);  // clear header row only
   tft.setTextPadding(0);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("TOGGLES", 4, 5, 1);
+  tft.drawString("TOGGLE MAP", 4, 5, 1);
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString(editing ? "UP/DN:chan  OK:set" : "OK:edit  CXL:back", LCD_W - 4, 5, 1);
+  const char* hint = !editing       ? "OK:edit  CXL:back"
+                     : (field == 0) ? "edit CH   OK:next"
+                                    : "edit FUNC OK:save";
+  tft.drawString(hint, LCD_W - 4, 5, 1);
 }
 
-// Redraw a single toggle cell (clears just its own area — no full-screen blank).
-void drawToggleCell(int t, bool sel, bool editing) {
-  int col = t < 5 ? 0 : 1;
-  int row = t < 5 ? t : t - 5;
-  int x = col ? 152 : 8;
-  int y = 17 + row * 12;
+// Draw one visible row. slot = visual position 0..TM_VISIBLE-1; eidx = index into
+// EDIT_TOGGLE (or out of range for a blank slot on the last short page).
+// field: 0 = channel, 1 = function (highlighted green when sel && editing).
+// Rendered into an off-screen sprite and blitted once, so a moving cursor never
+// flashes the row as a solid bar between clear and text.
+void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field) {
+  int y = TM_ROW_Y0 + slot * TM_ROW_H;
   uint16_t bg = sel ? TFT_NAVY : COL_BG;
-  tft.fillRect(col ? 148 : 2, y - 6, 134, 12, bg);  // clear only this cell
-  char b[16];
-  if (t == 5) {
-    snprintf(b, sizeof(b), "T6  MENU");
-  } else {
+  TFT_eSprite spr(&tft);
+  spr.createSprite(LCD_W, TM_ROW_H);
+  spr.fillSprite(bg);
+  if (eidx >= 0 && eidx < EDIT_TOGGLE_N) {
+    int t = EDIT_TOGGLE[eidx];
     uint8_t c = gconfig_toggle_chan(t);
-    if (c) snprintf(b, sizeof(b), "T%-2d CH%u", t + 1, c);
-    else snprintf(b, sizeof(b), "T%-2d --", t + 1);
+    uint8_t fn = gconfig_toggle_func(t);
+    char ts[6], cs[6], fs[10];
+    snprintf(ts, sizeof(ts), "T%d", t + 1);
+    if (c) snprintf(cs, sizeof(cs), "CH%u", c);
+    else snprintf(cs, sizeof(cs), "--");
+    snprintf(fs, sizeof(fs), "%s", FUNC_NAMES[fn < FUNC_COUNT ? fn : 0]);
+
+    uint16_t base = sel ? TFT_YELLOW : TFT_WHITE;
+    uint16_t chCol = (sel && editing && field == 0) ? TFT_GREEN : base;
+    uint16_t fnCol = (sel && editing && field == 1) ? TFT_GREEN : base;
+    int cy = TM_ROW_H / 2;  // vertical center inside the sprite
+    spr.setTextDatum(ML_DATUM);
+    spr.setTextPadding(0);
+    spr.setTextColor(base, bg);
+    spr.drawString(ts, 8, cy, 2);
+    spr.setTextColor(chCol, bg);
+    spr.drawString(cs, 72, cy, 2);
+    spr.setTextColor(fnCol, bg);
+    spr.drawString(fs, 150, cy, 2);
   }
-  uint16_t fg = (t == 5) ? TFT_DARKGREY : (sel ? (editing ? TFT_GREEN : TFT_YELLOW) : TFT_WHITE);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextPadding(0);
-  tft.setTextColor(fg, bg);
-  tft.drawString(b, x, y, 1);
+  spr.pushSprite(0, y - TM_ROW_H / 2);
+  spr.deleteSprite();
 }
 
-void drawToggleMapFull(int cursor, bool editing) {
-  tft.fillScreen(COL_BG);
-  drawToggleHeader(editing);
-  int cur_toggle = EDIT_TOGGLE[cursor];
-  for (int t = 0; t < 10; ++t) drawToggleCell(t, t == cur_toggle, editing);
+void drawToggleListFull(int scroll, int cursor, bool editing, int field) {
+  // Header + 4 sprite rows fully cover the panel, so no fillScreen (which would flash).
+  drawToggleHeader(editing, field);
+  for (int s = 0; s < TM_VISIBLE; ++s) {
+    int eidx = scroll + s;
+    drawToggleRow(s, eidx, eidx == cursor, editing, field);
+  }
 }
 
 // --- Menu item 4: CRSF module status (BetaFPV Nano TX V2).
@@ -743,10 +798,14 @@ void configLoop() {
   enum class Page : uint8_t { List, Gimbals, Toggles, Battery, Crsf, Reboot };
   Page page = Page::List;
   int sel = 0;
+  int menu_scroll = 0;  // index of the top visible main-menu row
   int gcursor = 0;   // selected channel on the Gimbals page
   int tmcursor = 0;  // selected toggle on the Toggle Mapping page
+  int tm_scroll = 0;  // index (into EDIT_TOGGLE) of the top visible row
   bool tm_editing = false;
+  int tm_field = 0;         // 0 = channel, 1 = function (which field OK cycles)
   uint8_t tm_prevchan = 0;  // channel before entering edit (for CANCEL revert)
+  uint8_t tm_prevfunc = 0;  // function before entering edit (for CANCEL revert)
   bool crsf_confirm = false;  // CRSF page: WiFi-setup confirm dialog
   bool redraw = true;
   EdgeKey ku, kd, kok, kcx;
@@ -760,16 +819,32 @@ void configLoop() {
     switch (page) {
       case Page::List:
         if (redraw) {
-          drawMenuListFull(sel);
+          if (sel < menu_scroll) menu_scroll = sel;
+          if (sel >= menu_scroll + LIST_VISIBLE) menu_scroll = sel - LIST_VISIBLE + 1;
+          drawMenuListFull(menu_scroll, sel);
           redraw = false;
         }
-        if (up && sel > 0) {  // redraw only old + new rows
-          drawMenuItem(sel, false);
-          drawMenuItem(--sel, true);
+        if (up && sel > 0) {
+          int old = sel;
+          sel--;
+          if (sel < menu_scroll) {  // scrolled up: repaint window
+            menu_scroll = sel;
+            drawMenuListFull(menu_scroll, sel);
+          } else {  // same window: repaint just the two rows
+            drawMenuRow(old - menu_scroll, old, false);
+            drawMenuRow(sel - menu_scroll, sel, true);
+          }
         }
         if (dn && sel < MENU_N - 1) {
-          drawMenuItem(sel, false);
-          drawMenuItem(++sel, true);
+          int old = sel;
+          sel++;
+          if (sel >= menu_scroll + LIST_VISIBLE) {  // scrolled down
+            menu_scroll = sel - LIST_VISIBLE + 1;
+            drawMenuListFull(menu_scroll, sel);
+          } else {
+            drawMenuRow(old - menu_scroll, old, false);
+            drawMenuRow(sel - menu_scroll, sel, true);
+          }
         }
         if (ok) {
           page = (Page)(1 + sel);
@@ -800,54 +875,97 @@ void configLoop() {
       }
       case Page::Toggles: {
         if (redraw) {
-          drawToggleMapFull(tmcursor, tm_editing);
+          // Keep the cursor inside the visible window before the full paint.
+          if (tmcursor < tm_scroll) tm_scroll = tmcursor;
+          if (tmcursor >= tm_scroll + TM_VISIBLE) tm_scroll = tmcursor - TM_VISIBLE + 1;
+          drawToggleListFull(tm_scroll, tmcursor, tm_editing, tm_field);
           redraw = false;
         }
         int t = EDIT_TOGGLE[tmcursor];
         if (!tm_editing) {
-          // Selection mode: move cursor (redraw only old+new cells).
+          // Selection mode: move cursor; scroll only when it leaves the window.
           if (up && tmcursor > 0) {
+            int old = tmcursor;
             tmcursor--;
-            drawToggleCell(t, false, false);
-            drawToggleCell(EDIT_TOGGLE[tmcursor], true, false);
+            if (tmcursor < tm_scroll) {  // scrolled up: repaint the window
+              tm_scroll = tmcursor;
+              drawToggleListFull(tm_scroll, tmcursor, false, 0);
+            } else {  // same window: repaint just the two affected rows
+              drawToggleRow(old - tm_scroll, old, false, false, 0);
+              drawToggleRow(tmcursor - tm_scroll, tmcursor, true, false, 0);
+            }
           }
           if (dn && tmcursor < EDIT_TOGGLE_N - 1) {
+            int old = tmcursor;
             tmcursor++;
-            drawToggleCell(t, false, false);
-            drawToggleCell(EDIT_TOGGLE[tmcursor], true, false);
+            if (tmcursor >= tm_scroll + TM_VISIBLE) {  // scrolled down
+              tm_scroll = tmcursor - TM_VISIBLE + 1;
+              drawToggleListFull(tm_scroll, tmcursor, false, 0);
+            } else {
+              drawToggleRow(old - tm_scroll, old, false, false, 0);
+              drawToggleRow(tmcursor - tm_scroll, tmcursor, true, false, 0);
+            }
           }
           if (ok) {
             tm_editing = true;
+            tm_field = 0;  // start on the channel field
             tm_prevchan = gconfig_toggle_chan(t);
-            drawToggleHeader(true);
-            drawToggleCell(t, true, true);
+            tm_prevfunc = gconfig_toggle_func(t);
+            drawToggleHeader(true, tm_field);
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
           }
           if (cx) {
             page = Page::List;
             redraw = true;
           }
-        } else {
-          // Edit mode: up/down cycle channel (redraw only this cell).
+        } else if (tm_field == 0) {
+          // Edit CHANNEL: up/down cycle channel; OK advances to function; CXL reverts.
           uint8_t c = gconfig_toggle_chan(t);
           if (up) {  // none -> 5..16 -> none
             gconfig_set_toggle_chan(t, (c == 0) ? 5 : (c >= 16 ? 0 : c + 1));
-            drawToggleCell(t, true, true);
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
           }
           if (dn) {  // none -> 16..5 -> none
             gconfig_set_toggle_chan(t, (c == 0) ? 16 : (c <= 5 ? 0 : c - 1));
-            drawToggleCell(t, true, true);
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
           }
-          if (ok) {
+          if (ok) {  // advance to the function field
+            tm_field = 1;
+            drawToggleHeader(true, tm_field);
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
+          }
+          if (cx) {  // cancel the whole edit, revert both fields
+            gconfig_set_toggle_chan(t, tm_prevchan);
+            gconfig_set_toggle_func(t, tm_prevfunc);
+            tm_editing = false;
+            drawToggleHeader(false, 0);
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, false, 0);
+          }
+        } else {
+          // Edit FUNCTION: up/down cycle label; OK saves both fields; CXL reverts.
+          uint8_t f = gconfig_toggle_func(t);
+          if (up) {
+            gconfig_set_toggle_func(t, (uint8_t)((f + 1) % FUNC_COUNT));
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
+          }
+          if (dn) {
+            gconfig_set_toggle_func(t, (uint8_t)((f + FUNC_COUNT - 1) % FUNC_COUNT));
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
+          }
+          if (ok) {  // commit channel + function
             safeSaveGconfig();
             tm_editing = false;
-            drawToggleHeader(false);
-            drawToggleCell(t, true, false);
+            tm_field = 0;
+            drawToggleHeader(false, 0);
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, false, 0);
           }
-          if (cx) {
-            gconfig_set_toggle_chan(t, tm_prevchan);  // revert
+          if (cx) {  // cancel the whole edit, revert both fields
+            gconfig_set_toggle_chan(t, tm_prevchan);
+            gconfig_set_toggle_func(t, tm_prevfunc);
             tm_editing = false;
-            drawToggleHeader(false);
-            drawToggleCell(t, true, false);
+            tm_field = 0;
+            drawToggleHeader(false, 0);
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, false, 0);
           }
         }
         break;

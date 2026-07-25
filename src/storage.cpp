@@ -13,6 +13,7 @@ constexpr const char* NS = "bertrc";
 constexpr const char* KEY_CAL = "gcal";
 constexpr const char* KEY_FLIP = "gflip";
 constexpr const char* KEY_TMAP = "tmap";
+constexpr const char* KEY_TFUNC = "tfunc";
 constexpr const char* KEY_WIFI_BOOT = "wifiboot";
 constexpr const char* KEY_TOTAL_FLIGHT = "tflight";
 
@@ -74,6 +75,16 @@ bool storage_load_toggles(uint8_t out[10]) {
 bool storage_save_toggles(const uint8_t in[10]) {
   if (!g_open) return false;
   return prefs.putBytes(KEY_TMAP, in, 10) == 10;
+}
+
+bool storage_load_toggle_funcs(uint8_t out[10]) {
+  if (!g_open) return false;
+  return prefs.getBytes(KEY_TFUNC, out, 10) == 10;
+}
+
+bool storage_save_toggle_funcs(const uint8_t in[10]) {
+  if (!g_open) return false;
+  return prefs.putBytes(KEY_TFUNC, in, 10) == 10;
 }
 
 bool storage_get_wifi_boot() {
