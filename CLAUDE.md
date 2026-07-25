@@ -137,7 +137,7 @@ Lib: `Adafruit_MCP23X17`.
 - Both pins carry internal 270 pF caps to GPIO37/38.
 
 ## Filtering (per gimbal channel)
-Pipeline: **oversample(8) → median-of-21 → EMA(α=0.12) → hysteresis deadband(35)**
+Pipeline: **oversample(8) → median-of-11 → EMA(α=0.12) → hysteresis deadband(35)**
 Tuned on hardware to kill ESP32 ADC jitter. The **deadband** is the key at-rest fix:
 the output holds until it moves >35 counts (~0.85%), so a still stick shows zero jitter
 with no lag on real movement. Oversample/median/EMA reduce the jitter amplitude; the

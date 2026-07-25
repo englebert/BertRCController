@@ -19,7 +19,7 @@ constexpr int NCH = 4;
 
 // Noise handling: oversample -> median-of-N (spike reject) -> EMA -> hysteresis deadband.
 constexpr int OVERSAMPLE = 8;      // raw reads averaged per sample (~sqrt reduction)
-constexpr int MED_N = 21;          // median window (spike rejection)
+constexpr int MED_N = 11;          // median window (spike rejection) — ~5 ms group delay
 constexpr float EMA_ALPHA = 0.12f;  // EMA smoothing after the median (lower = smoother)
 // Deadband: hold the output steady until it moves more than this many counts. Kills
 // at-rest jitter with no lag on real movement (~DEADBAND/4095 = 0.24% dead to micro-moves).
