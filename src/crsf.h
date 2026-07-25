@@ -26,6 +26,10 @@ bool crsf_get(CrsfLink& out);
 // Copy the 16 CRSF channel values (172..1811) last sent. Safe from any task.
 void crsf_get_channels(uint16_t out[16]);
 
+// Arm-safety state for the UI: -1 = no ARM toggle mapped (throttle passes through),
+// 0 = disarmed (throttle held at idle), 1 = armed. Safe from any task.
+int crsf_arm_state();
+
 // Pause/resume the CRSF task (stops UART traffic). Wrap NVS/flash writes with these —
 // UART interrupt activity during a flash-cache-disabled window can panic.
 void crsf_pause();

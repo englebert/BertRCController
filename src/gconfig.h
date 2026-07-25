@@ -20,6 +20,13 @@ void gconfig_set_flip(int idx, bool v);  // update cache; persist with gconfig_s
 uint8_t gconfig_toggle_chan(int toggle);          // read (CRSF task)
 void gconfig_set_toggle_chan(int toggle, uint8_t ch);  // update cache
 
+// Toggle function-label indices. MUST match the UI's FUNC_NAMES[] order. 0 = none.
+// ARM is special: it drives the throttle-hold arm-safety in crsf.cpp.
+enum {
+  GFUNC_NONE = 0,
+  GFUNC_ARM = 1,
+};
+
 // --- Toggle -> function label. Value = index into the UI function list, 0 = none ---
 uint8_t gconfig_toggle_func(int toggle);
 void gconfig_set_toggle_func(int toggle, uint8_t f);

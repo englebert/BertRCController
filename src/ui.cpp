@@ -354,6 +354,16 @@ void renderRc() {
   bool ok = power_get(pr);
   char b[16];
 
+  // Arm-safety banner (top-right). Red ARMED = motors live; green DISARMED = throttle
+  // held at idle; grey NO ARM = no toggle assigned the ARM function.
+  int as = crsf_arm_state();
+  const char* at = (as < 0) ? "NO ARM" : (as == 0 ? "DISARMED" : "ARMED");
+  uint16_t ac = (as < 0) ? TFT_DARKGREY : (as == 0 ? TFT_GREEN : TFT_RED);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextPadding(96);
+  tft.setTextColor(ac, TFT_BLACK);
+  tft.drawString(at, LCD_W - 4, 8, 2);
+
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(120);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -618,7 +628,7 @@ constexpr int EDIT_TOGGLE_N = 9;
 const char* const FUNC_NAMES[] = {"-",   "ARM", "ANGLE", "HORIZ", "ACRO",
                                   "AIR", "TURTLE", "RTH", "BEEP", "PREARM"};
 constexpr int FUNC_COUNT = 10;
-constexpr uint8_t FUNC_ARM = 1;
+constexpr uint8_t FUNC_ARM = GFUNC_ARM;  // shared with crsf.cpp arm-safety
 
 // Scrolling list geometry (shares the main-menu list geometry).
 constexpr int TM_VISIBLE = LIST_VISIBLE;

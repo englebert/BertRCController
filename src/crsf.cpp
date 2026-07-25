@@ -36,6 +36,7 @@ TaskHandle_t g_task = nullptr;
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 CrsfLink g_link = {false, 0, 0, 0, 0, 0};
 uint16_t g_channels[16] = {0};  // last sent channel values, guarded by g_mux
+int g_arm_state = -1;  // -1 = no ARM toggle mapped, 0 = disarmed, 1 = armed (g_mux)
 
 uint8_t crc8_dvb_s2(const uint8_t* data, int len) {
   uint8_t crc = 0;
@@ -106,6 +107,17 @@ void buildChannels(uint16_t ch[16]) {
     if (chan < 5 || chan > 16) continue;
     ch[chan - 1] = (sw.bits & (1u << TOGGLE_BIT[i])) ? CRSF_MAX : CRSF_MIN;
   }
+
+  // Arm safety: hold throttle at idle until the ARM-mapped toggle is ON. If no toggle
+  // has the ARM function, throttle passes through (unconfigured). A disarmed or
+  // not-yet-valid switch read forces the throttle stick to virtual zero (flip-aware).
+  int armT = gconfig_toggle_with_func(GFUNC_ARM);
+  bool armed = (armT < 0) ? true : (sw.bits & (1u << TOGGLE_BIT[armT])) != 0;
+  if (!armed) ch[2] = adcToCrsf(0, 0);  // CH3 = throttle
+
+  portENTER_CRITICAL(&g_mux);
+  g_arm_state = (armT < 0) ? -1 : (armed ? 1 : 0);
+  portEXIT_CRITICAL(&g_mux);
 }
 
 void sendRcFrame() {
@@ -220,6 +232,13 @@ void crsf_get_channels(uint16_t out[16]) {
   portENTER_CRITICAL(&g_mux);
   memcpy(out, g_channels, sizeof(g_channels));
   portEXIT_CRITICAL(&g_mux);
+}
+
+int crsf_arm_state() {
+  portENTER_CRITICAL(&g_mux);
+  int s = g_arm_state;
+  portEXIT_CRITICAL(&g_mux);
+  return s;
 }
 
 
