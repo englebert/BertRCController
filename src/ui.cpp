@@ -394,16 +394,19 @@ struct TeleItem {
   const char* name;
 };
 const TeleItem TELE_ITEMS[] = {
-    {"UPLINK LQ"}, {"UPLINK RSSI"}, {"UPLINK SNR"}, {"DOWN LQ"},
-    {"DOWN RSSI"}, {"DOWN SNR"},    {"TX POWER"},   {"RF MODE"},
+    {"UPLINK LQ"},  {"UPLINK RSSI"}, {"UPLINK SNR"}, {"DOWN LQ"},
+    {"DOWN RSSI"},  {"DOWN SNR"},    {"TX POWER"},   {"RF MODE"},
+    {"BATT VOLT"},  {"BATT CURR"},   {"BATT USED"},  {"BATT LEVEL"},
 };
-constexpr int TELE_N = 8;
+constexpr int TELE_N = 12;
 
 uint16_t g_telemSel = 0;  // bitmask of items shown on the main RC screen (bit i = item i)
 
-// Full value string for item i, e.g. "100%", "-45 dBm", "25 mW"; "--" when no telemetry.
+// Full value string for item i, e.g. "100%", "-45 dBm", "25 mW"; "--" when unavailable.
+// Link-stats items need `ok` (link telemetry seen); battery items need l.batt_valid.
 void teleValue(int i, const CrsfLink& l, bool ok, char* b, size_t n) {
-  if (!ok) {
+  bool avail = (i < 8) ? ok : l.batt_valid;
+  if (!avail) {
     snprintf(b, n, "--");
     return;
   }
@@ -416,6 +419,10 @@ void teleValue(int i, const CrsfLink& l, bool ok, char* b, size_t n) {
     case 5: snprintf(b, n, "%d dB", l.dn_snr); break;
     case 6: snprintf(b, n, "%u mW", crsf_tx_power_mw(l.tx_power)); break;
     case 7: snprintf(b, n, "%u", l.rf_mode); break;
+    case 8: snprintf(b, n, "%.1f V", l.batt_dv / 10.0f); break;
+    case 9: snprintf(b, n, "%.1f A", l.batt_da / 10.0f); break;
+    case 10: snprintf(b, n, "%lu mAh", (unsigned long)l.batt_mah); break;
+    case 11: snprintf(b, n, "%u%%", l.batt_pct); break;
     default: snprintf(b, n, "--"); break;
   }
 }
@@ -431,6 +438,10 @@ void teleShort(int i, const CrsfLink& l, char* b, size_t n) {
     case 5: snprintf(b, n, "dSNR%d", l.dn_snr); break;
     case 6: snprintf(b, n, "%umW", crsf_tx_power_mw(l.tx_power)); break;
     case 7: snprintf(b, n, "M%u", l.rf_mode); break;
+    case 8: snprintf(b, n, l.batt_valid ? "%.1fV" : "V--", l.batt_dv / 10.0f); break;
+    case 9: snprintf(b, n, l.batt_valid ? "%.1fA" : "A--", l.batt_da / 10.0f); break;
+    case 10: snprintf(b, n, l.batt_valid ? "%lumAh" : "mAh--", (unsigned long)l.batt_mah); break;
+    case 11: snprintf(b, n, l.batt_valid ? "b%u%%" : "b--", l.batt_pct); break;
     default: b[0] = 0; break;
   }
 }

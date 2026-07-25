@@ -24,6 +24,7 @@ constexpr uint8_t ADDR_FC = 0xC8;
 constexpr uint8_t ADDR_RX = 0xEC;
 constexpr uint8_t TYPE_RC_CHANNELS = 0x16;      // our TX (echo -> ignore on RX)
 constexpr uint8_t TYPE_LINK_STATISTICS = 0x14;  // module telemetry we care about
+constexpr uint8_t TYPE_BATTERY_SENSOR = 0x08;   // FC pack V/I/mAh relayed up the link
 
 // CRSF 11-bit channel range: 172=min, 992=center, 1811=max.
 constexpr uint16_t CRSF_MIN = 172;
@@ -160,6 +161,13 @@ void handleFrame(uint8_t type, const uint8_t* payload, int plen) {
     g_link.dn_snr = (int8_t)payload[9];
     g_link.valid = true;
     g_linkstats_ms = millis();
+  } else if (type == TYPE_BATTERY_SENSOR && plen >= 8) {
+    // Big-endian: [0-1] voltage (0.1V), [2-3] current (0.1A), [4-6] used mAh, [7] %.
+    g_link.batt_dv = (uint16_t)((payload[0] << 8) | payload[1]);
+    g_link.batt_da = (uint16_t)((payload[2] << 8) | payload[3]);
+    g_link.batt_mah = ((uint32_t)payload[4] << 16) | ((uint32_t)payload[5] << 8) | payload[6];
+    g_link.batt_pct = payload[7];
+    g_link.batt_valid = true;
   }
   portEXIT_CRITICAL(&g_mux);
 }

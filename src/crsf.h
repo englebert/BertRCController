@@ -21,6 +21,12 @@ struct CrsfLink {
   int8_t dn_snr;       // downlink SNR (dB)
   uint8_t tx_power;    // uplink TX power index (map with crsf_tx_power_mw)
   uint8_t ant;         // active antenna
+  // Downlink FC battery telemetry (CRSF battery-sensor frame 0x08), if the FC sends it.
+  bool batt_valid;     // a battery-sensor frame has been received
+  uint16_t batt_dv;    // pack voltage in 0.1 V units
+  uint16_t batt_da;    // pack current in 0.1 A units
+  uint32_t batt_mah;   // used capacity (mAh)
+  uint8_t batt_pct;    // battery remaining (%)
 };
 
 // Map the CRSF TX-power index to milliwatts (0 for unknown index).
