@@ -28,6 +28,8 @@ constexpr uint8_t TYPE_BATTERY_SENSOR = 0x08;   // FC pack V/I/mAh relayed up th
 constexpr uint8_t TYPE_RADIO_ID = 0x3A;         // OpenTX sync (frequent — skip in probe log)
 constexpr uint8_t TYPE_DEVICE_PING = 0x28;      // probe: ask "who's on the bus?"
 constexpr uint8_t TYPE_DEVICE_INFO = 0x29;      // reply to ping: module name + param count
+constexpr uint8_t TYPE_PARAM_ENTRY = 0x2B;      // reply to a param read (chunked)
+constexpr uint8_t TYPE_PARAM_READ = 0x2C;       // request one param entry (by field + chunk)
 constexpr uint8_t TYPE_PARAM_WRITE = 0x2D;      // Lua parameter write (e.g. set TX power)
 constexpr uint8_t ADDR_BROADCAST = 0x00;
 
@@ -48,8 +50,9 @@ CrsfLink g_link = {};
 uint16_t g_channels[16] = {0};  // last sent channel values, guarded by g_mux
 int g_arm_state = -1;  // -1 = no ARM toggle mapped, 0 = disarmed, 1 = armed (g_mux)
 uint32_t g_linkstats_ms = 0;  // millis() of the last link-stats frame (g_mux)
-int g_power_idx = 0;      // pending TX-power value to write (g_mux)
-int g_power_repeat = 0;   // remaining times to resend the power write (g_mux)
+int g_power_idx = 0;      // pending param write value (g_mux)
+int g_power_repeat = 0;   // remaining times to resend the queued write (g_mux)
+int g_write_field = 6;    // param field id for the queued write (6 = Max Power)
 // Diagnostic: ping the module + tally/log RX frame types to serial. Left off — testing
 // showed the module streams sync (0x3A) but never answers device pings (0x29) on this
 // half-duplex link, so the CRSF param/command path (incl. WiFi trigger) isn't available;
@@ -178,8 +181,8 @@ void sendPowerWrite(uint8_t value) {
   f[2] = TYPE_PARAM_WRITE;  // 0x2D
   f[3] = ADDR_MODULE;       // dest ext = the TX module (0xEE)
   f[4] = ADDR_RADIO;        // origin ext = radio handset (0xEA) — module validates this
-  f[5] = POWER_FIELD_ID;    // "Max Power" field
-  f[6] = value;             // power index (into the module's filtered table, min-power = 0)
+  f[5] = (uint8_t)g_write_field;  // param field id (6 = Max Power, 8 = Fan Thresh, ...)
+  f[6] = value;             // option index
   f[7] = crc8_dvb_s2(&f[2], 5);
   uart.write(f, sizeof(f));
   uart.flush();
@@ -268,6 +271,103 @@ void feed(uint8_t b) {
   if (rxlen >= (int)sizeof(rxbuf)) rxlen = 0;  // overflow guard
 }
 
+// ---- ELRS parameter discovery/write (blocking; used with the CRSF task suspended) ----
+
+// Send an extended-header request: [sync][len][type][dest][origin][args...][crc].
+void paramSendExt(uint8_t type, uint8_t dest, const uint8_t* args, int nargs) {
+  uint8_t f[16];
+  f[0] = ADDR_MODULE;
+  f[1] = (uint8_t)(3 + nargs + 1);  // type + dest + origin + args + crc
+  f[2] = type;
+  f[3] = dest;
+  f[4] = ADDR_RADIO;  // origin = radio handset (module validates this)
+  for (int i = 0; i < nargs; ++i) f[5 + i] = args[i];
+  f[5 + nargs] = crc8_dvb_s2(&f[2], (int)f[1] - 1);
+  uart.write(f, 6 + nargs);
+  uart.flush();
+}
+
+// Block until a CRSF frame of `wantType` arrives (skipping sync/echo/other). Returns the
+// payload length (bytes after type, minus CRC) into payload[], or -1 on timeout.
+int paramRecv(uint8_t wantType, uint8_t* payload, int maxlen, uint32_t timeout_ms) {
+  uint32_t start = millis();
+  uint8_t buf[64];
+  int len = 0, total = -1;
+  while ((millis() - start) < timeout_ms) {
+    if (!uart.available()) {
+      vTaskDelay(1);
+      continue;
+    }
+    uint8_t b = (uint8_t)uart.read();
+    if (len == 0) {
+      if (b != ADDR_RADIO && b != ADDR_FC && b != ADDR_MODULE) continue;  // resync on addr
+      buf[len++] = b;
+    } else if (len == 1) {
+      if (b < 2 || b > 62) {
+        len = 0;
+        continue;
+      }
+      buf[len++] = b;
+      total = buf[1] + 2;
+    } else {
+      buf[len++] = b;
+      if (len >= total) {
+        if (crc8_dvb_s2(&buf[2], buf[1] - 1) == buf[total - 1] && buf[2] == wantType) {
+          int plen = buf[1] - 2;
+          if (plen > maxlen) plen = maxlen;
+          memcpy(payload, &buf[3], plen);
+          return plen;
+        }
+        len = 0;
+        total = -1;
+      }
+      if (len >= (int)sizeof(buf)) {
+        len = 0;
+        total = -1;
+      }
+    }
+  }
+  return -1;
+}
+
+// Ping the module and read the parameter count from its DEVICE_INFO reply.
+bool paramDeviceInfo(uint8_t* count) {
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    while (uart.available()) uart.read();
+    paramSendExt(TYPE_DEVICE_PING, ADDR_BROADCAST, nullptr, 0);
+    uint8_t p[64];
+    int plen = paramRecv(TYPE_DEVICE_INFO, p, sizeof(p), 400);
+    if (plen >= 4) {
+      // payload: [dest][origin][name\0][serial4][hw4][sw4][param_count][param_ver]
+      *count = p[plen - 2];  // second-to-last byte
+      return true;
+    }
+  }
+  return false;
+}
+
+// Read and reassemble one parameter entry's data (from [parent] onward) into data[].
+// Returns the reassembled length, or -1 on error/timeout.
+int paramReadEntry(uint8_t field, uint8_t* data, int maxlen) {
+  int total = 0;
+  for (int chunk = 0; chunk < 16; ++chunk) {
+    while (uart.available()) uart.read();
+    uint8_t args[2] = {field, (uint8_t)chunk};
+    paramSendExt(TYPE_PARAM_READ, ADDR_MODULE, args, 2);
+    uint8_t p[64];
+    int plen = paramRecv(TYPE_PARAM_ENTRY, p, sizeof(p), 400);
+    if (plen < 4 || p[2] != field) return -1;  // p = [dest][origin][field][remaining][data..]
+    uint8_t remaining = p[3];
+    int dlen = plen - 4;
+    if (dlen < 0) dlen = 0;
+    if (total + dlen > maxlen) dlen = maxlen - total;
+    memcpy(data + total, &p[4], dlen);
+    total += dlen;
+    if (remaining == 0) return total;
+  }
+  return -1;
+}
+
 void crsfTask(void*) {
   const TickType_t period = pdMS_TO_TICKS(1000 / TX_RATE_HZ);  // 2 ms @ 500 Hz
   TickType_t last = xTaskGetTickCount();
@@ -351,12 +451,90 @@ bool crsf_telem_online() {
   return (millis() - t) < 1000;         // stale after 1 s without a link-stats frame
 }
 
+// Queue a parameter write the CRSF task sends by holding RC for ~6 ticks (the proven path).
+void queueParamWrite(int field, int value) {
+  portENTER_CRITICAL(&g_mux);
+  g_write_field = field;
+  g_power_idx = value;
+  g_power_repeat = 6;
+  portEXIT_CRITICAL(&g_mux);
+}
+
 void crsf_set_power(int level_index) {
   if (level_index < 0 || level_index > 7) return;
-  portENTER_CRITICAL(&g_mux);
-  g_power_idx = level_index;
-  g_power_repeat = 6;  // hold RC for ~6 ticks (~24 ms) and send the write on the quiet wire
-  portEXIT_CRITICAL(&g_mux);
+  queueParamWrite(POWER_FIELD_ID, level_index);
+}
+
+void crsf_param_set(int field, int value) {
+  if (field < 1 || field > 255 || value < 0 || value > 255) return;
+  queueParamWrite(field, value);
+}
+
+bool crsf_param_scan(const char* name_substr, CrsfParam& out) {
+  out.field = -1;
+  out.value = 0;
+  out.max = 0;
+  out.options[0] = 0;
+  out.dbg_count = 0;
+  out.dbg_read = 0;
+
+  // Suspend RC so the whole ping/read sequence runs on a quiet wire.
+  bool suspended = false;
+  if (g_task) {
+    vTaskSuspend(g_task);
+    suspended = true;
+    vTaskDelay(pdMS_TO_TICKS(5));  // let any in-flight TX/echo drain
+  }
+  uart.flush();
+
+  uint8_t count = 0;
+  if (paramDeviceInfo(&count) && count > 0 && count < 64) {
+    out.dbg_count = count;
+    uint8_t data[256];
+    for (uint8_t field = 1; field <= count && out.field < 0; ++field) {
+      int dlen = paramReadEntry(field, data, sizeof(data) - 1);
+      if (dlen < 3) continue;
+      out.dbg_read++;
+      data[dlen] = 0;  // ensure strings are terminated
+      // Reassembled entry: [0]parent [1]type [2..]name\0 [then type-specific data].
+      const char* pname = (const char*)&data[2];
+      if (!strstr(pname, name_substr)) continue;
+      out.field = field;
+      // Text-selection payload after the name: options\0 value min max default unit\0.
+      int o = 2 + (int)strlen(pname) + 1;
+      if (o < dlen) {
+        strncpy(out.options, (const char*)&data[o], sizeof(out.options) - 1);
+        out.options[sizeof(out.options) - 1] = 0;
+        int vpos = o + (int)strlen((const char*)&data[o]) + 1;
+        if (vpos + 2 < dlen) {
+          out.value = data[vpos];
+          out.max = data[vpos + 2];
+        }
+      }
+    }
+  }
+
+  if (suspended) vTaskResume(g_task);
+  return out.field >= 0;
+}
+
+bool crsf_param_write(int field, uint8_t value) {
+  if (field < 1 || field > 255) return false;
+  bool suspended = false;
+  if (g_task) {
+    vTaskSuspend(g_task);
+    suspended = true;
+    vTaskDelay(pdMS_TO_TICKS(5));
+  }
+  uart.flush();
+  while (uart.available()) uart.read();
+  uint8_t args[2] = {(uint8_t)field, value};
+  for (int i = 0; i < 4; ++i) {  // send a few times on the quiet wire
+    paramSendExt(TYPE_PARAM_WRITE, ADDR_MODULE, args, 2);
+    vTaskDelay(pdMS_TO_TICKS(4));
+  }
+  if (suspended) vTaskResume(g_task);
+  return true;
 }
 
 uint16_t crsf_tx_power_mw(uint8_t idx) {

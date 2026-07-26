@@ -38,6 +38,26 @@ uint16_t crsf_tx_power_mw(uint8_t idx);
 // crsf_get().tx_power.
 void crsf_set_power(int level_index);
 
+// --- ELRS Lua parameter discovery/write (for settings without a fixed field ID, e.g. the
+// cooling-fan threshold). These BLOCK for up to ~2 s and suspend the CRSF task internally
+// (RC held) so the request/response isn't corrupted on the shared wire. Call from the UI
+// task while not armed.
+struct CrsfParam {
+  int field;          // discovered field id (1..count), -1 if not found / no reply
+  uint8_t value;      // current option index
+  uint8_t max;        // highest option index (option count = max + 1)
+  char options[96];   // ';'-separated option labels, from the module
+  uint8_t dbg_count;  // params reported by DEVICE_INFO (0 = no ping reply)
+  uint8_t dbg_read;   // entries successfully read during the walk
+};
+// Walk the parameter tree and return the first field whose name contains `name_substr`.
+bool crsf_param_scan(const char* name_substr, CrsfParam& out);
+// Write an option index to a parameter field. Returns false if the field is invalid.
+bool crsf_param_write(int field, uint8_t value);
+// Queue a fire-and-forget parameter write via the CRSF task's proven RC-hold path (same as
+// crsf_set_power). value = raw option index. Use for settings like the fan threshold.
+void crsf_param_set(int field, int value);
+
 // True while link-stats telemetry is fresh (a link-stats frame within the last ~1 s);
 // false when telemetry has never arrived or has gone stale (link/module offline).
 bool crsf_telem_online();

@@ -77,6 +77,17 @@ bool safeSaveTelemSel(uint16_t sel) {  // persist main-screen telemetry selectio
   return true;
 }
 
+bool safeSaveFanThresh(uint8_t v) {  // remember the fan threshold we last wrote
+  crsf_pause();
+  gimbals_pause();
+  switches_pause();
+  storage_set_fan_thresh(v);
+  switches_resume();
+  gimbals_resume();
+  crsf_resume();
+  return true;
+}
+
 bool safeAddFlight(uint32_t secs) {  // accumulate armed time into NVS total
   crsf_pause();
   gimbals_pause();
@@ -539,8 +550,8 @@ bool toggleOn(int bit);  // fwd decl (defined below)
 
 const char* const MENU_ITEMS[] = {"GIMBALS & TRIM", "TOGGLE MAPPING", "BATTERY INFO",
                                    "TELEMETRY",      "CRSF MODULE",    "TX POWER",
-                                   "REBOOT"};
-constexpr int MENU_N = 7;
+                                   "FAN",            "REBOOT"};
+constexpr int MENU_N = 8;
 
 struct RawKeys {
   bool up, down, ok, cancel;
@@ -734,6 +745,55 @@ void drawPowerVisible(int scroll, int cursor, uint16_t now_mw, int sent) {
 void drawPowerFull(int scroll, int cursor, uint16_t now_mw, int sent) {
   drawPowerHeader(now_mw, sent);
   drawPowerVisible(scroll, cursor, now_mw, sent);
+}
+
+// --- Menu item: FAN threshold — the TX power at/above which the module's fan runs.
+// Blind CRSF parameter write to "Fan Thresh" (ELRS 3.4.x field 8; value = raw option
+// index, no min-shift). No telemetry read-back for the fan, so no live "current" marker.
+const char* const FAN_OPTS[] = {"10mW",  "25mW",  "50mW",   "100mW", "250mW",
+                                "500mW", "1000mW", "2000mW", "NEVER"};
+constexpr int FAN_N = 9;
+constexpr int FAN_FIELD = 8;  // Max Power(6) -> Dynamic(7) -> Fan Thresh(8) on ELRS 3.4.x
+
+void drawFanHeader(int field, int sent) {
+  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("FAN THRESHOLD", 4, 5, 1);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(sent >= 0 ? TFT_GREEN : TFT_DARKGREY, COL_BG);
+  tft.drawString(sent >= 0 ? "SAVED" : "OK:set  CXL:back", LCD_W - 4, 5, 1);
+}
+
+// green bullet = module's current threshold; cyan text = the option we just wrote.
+void drawFanRow(int slot, const char* label, bool cursor, bool is_current, bool is_sent) {
+  int y = LIST_ROW_Y0 + slot * LIST_ROW_H;
+  uint16_t bg = cursor ? TFT_NAVY : COL_BG;
+  TFT_eSprite spr(&tft);
+  spr.createSprite(LCD_W, LIST_ROW_H);
+  spr.setTextFont(1);
+  spr.setTextSize(1);
+  spr.fillSprite(bg);
+  if (label) {
+    int cy = LIST_ROW_H / 2;
+    if (is_current) spr.fillCircle(9, cy, 4, TFT_GREEN);
+    else spr.drawCircle(9, cy, 4, TFT_DARKGREY);
+    spr.setTextDatum(ML_DATUM);
+    spr.setTextColor(is_sent ? TFT_CYAN : TFT_WHITE, bg);
+    spr.drawString(label, 22, cy, 2);
+  }
+  spr.pushSprite(0, y - LIST_ROW_H / 2);
+  spr.deleteSprite();
+}
+
+void drawFanList(int scroll, int cursor, const char* const* labels, int n, int current,
+                 int sent, int field) {
+  drawFanHeader(field, sent);
+  for (int s = 0; s < LIST_VISIBLE; ++s) {
+    int idx = scroll + s;
+    drawFanRow(s, idx < n ? labels[idx] : nullptr, idx == cursor, idx == current, idx == sent);
+  }
 }
 
 // --- Menu item 1: Gimbals position + channel reverse (flip).
@@ -1089,7 +1149,7 @@ void drawWifiSetup() {
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
 void configLoop() {
   enum class Page : uint8_t {
-    List, Gimbals, Toggles, Battery, Telemetry, Crsf, Power, Reboot
+    List, Gimbals, Toggles, Battery, Telemetry, Crsf, Power, Fan, Reboot
   };
   Page page = Page::List;
   int sel = 0;
@@ -1108,6 +1168,8 @@ void configLoop() {
   int pw_scroll = 0;   // top visible power row
   int pw_tick = 0;     // throttles the "NOW" telemetry refresh
   int pw_sent = -1;    // last power level we sent (for the cyan marker)
+  int fan_cursor = 0, fan_scroll = 0, fan_sent = -1;  // FAN page (blind write to field 8)
+  int fan_current = -2;  // last-written threshold (green dot); -2 = not yet loaded from NVS
   bool crsf_confirm = false;  // CRSF page: WiFi-setup confirm dialog
   bool redraw = true;
   EdgeKey ku, kd, kok, kcx;
@@ -1352,6 +1414,41 @@ void configLoop() {
           pw_tick = 0;
           drawPowerHeader(now, pw_sent);
           drawPowerVisible(pw_scroll, pw_cursor, now, pw_sent);
+        }
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        break;
+      }
+      case Page::Fan: {
+        if (redraw) {
+          if (fan_current == -2) {  // first entry: load the remembered threshold
+            uint8_t v = storage_get_fan_thresh();
+            fan_current = (v < FAN_N) ? v : -1;
+            if (fan_current >= 0) fan_cursor = fan_current;  // start on the current one
+          }
+          if (fan_cursor < fan_scroll) fan_scroll = fan_cursor;
+          if (fan_cursor >= fan_scroll + LIST_VISIBLE) fan_scroll = fan_cursor - LIST_VISIBLE + 1;
+          drawFanList(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent, FAN_FIELD);
+          redraw = false;
+        }
+        if (up && fan_cursor > 0) {
+          fan_cursor--;
+          if (fan_cursor < fan_scroll) fan_scroll = fan_cursor;
+          drawFanList(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent, FAN_FIELD);
+        }
+        if (dn && fan_cursor < FAN_N - 1) {
+          fan_cursor++;
+          if (fan_cursor >= fan_scroll + LIST_VISIBLE) fan_scroll = fan_cursor - LIST_VISIBLE + 1;
+          drawFanList(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent, FAN_FIELD);
+        }
+        if (ok) {  // blind write the selected threshold (field 8, raw option index) + remember it
+          safeSaveFanThresh((uint8_t)fan_cursor);
+          crsf_param_set(FAN_FIELD, fan_cursor);
+          fan_sent = fan_cursor;
+          fan_current = fan_cursor;  // green dot moves to the new setting
+          drawFanList(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent, FAN_FIELD);
         }
         if (cx) {
           page = Page::List;

@@ -47,6 +47,11 @@ void storage_set_wifi_boot(bool v);
 uint16_t storage_get_telem_sel();
 void storage_set_telem_sel(uint16_t v);
 
+// Last fan-threshold option index we wrote to the module (for the UI's current marker).
+// Returns 0xFF when never set. The module itself is the source of truth.
+uint8_t storage_get_fan_thresh();
+void storage_set_fan_thresh(uint8_t v);
+
 // Total accumulated flight time (persisted). Used by Phase 2.
 uint32_t storage_get_total_flight_secs();
 void storage_add_flight_secs(uint32_t secs);

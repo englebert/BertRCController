@@ -17,6 +17,7 @@ constexpr const char* KEY_TFUNC = "tfunc";
 constexpr const char* KEY_WIFI_BOOT = "wifiboot";
 constexpr const char* KEY_TOTAL_FLIGHT = "tflight";
 constexpr const char* KEY_TELEM_SEL = "telemsel";
+constexpr const char* KEY_FAN_THRESH = "fanthr";
 
 }  // namespace
 
@@ -104,6 +105,15 @@ uint16_t storage_get_telem_sel() {
 
 void storage_set_telem_sel(uint16_t v) {
   if (g_open) prefs.putUShort(KEY_TELEM_SEL, v);
+}
+
+uint8_t storage_get_fan_thresh() {
+  if (!g_open) return 0xFF;
+  return prefs.getUChar(KEY_FAN_THRESH, 0xFF);
+}
+
+void storage_set_fan_thresh(uint8_t v) {
+  if (g_open) prefs.putUChar(KEY_FAN_THRESH, v);
 }
 
 uint32_t storage_get_total_flight_secs() {
