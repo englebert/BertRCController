@@ -538,8 +538,9 @@ void renderRc() {
 bool toggleOn(int bit);  // fwd decl (defined below)
 
 const char* const MENU_ITEMS[] = {"GIMBALS & TRIM", "TOGGLE MAPPING", "BATTERY INFO",
-                                   "TELEMETRY", "CRSF MODULE", "REBOOT"};
-constexpr int MENU_N = 6;
+                                   "TELEMETRY",      "CRSF MODULE",    "TX POWER",
+                                   "REBOOT"};
+constexpr int MENU_N = 7;
 
 struct RawKeys {
   bool up, down, ok, cancel;
@@ -673,6 +674,66 @@ void drawTeleVisible(int scroll, int cursor, const CrsfLink& l, bool lok) {
 void drawTeleFull(int scroll, int cursor, const CrsfLink& l, bool lok) {
   drawTeleHeader();
   drawTeleVisible(scroll, cursor, l, lok);
+}
+
+// --- Menu item: TX Power. OK sends a CRSF param write; module clamps to its range and
+// reports the actual power back via telemetry (green bullet = module's current power). ---
+// Index == the value byte sent = index into the module's filtered power table, which
+// starts at its MIN power. The Nano TX V2's min is 25 mW (there is no 10 mW), so the list
+// starts at 25 mW; otherwise every level lands one step high.
+const uint16_t POWER_MW[] = {25, 50, 100, 250, 500, 1000};
+constexpr int POWER_N = 6;
+
+void drawPowerHeader(uint16_t now_mw, int sent) {
+  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString("TX POWER", 4, 5, 1);
+  char nows[8];
+  if (now_mw) snprintf(nows, sizeof(nows), "%u", now_mw);
+  else snprintf(nows, sizeof(nows), "--");
+  char b[28];
+  if (sent >= 0) snprintf(b, sizeof(b), "NOW:%s SET:%u", nows, POWER_MW[sent]);
+  else snprintf(b, sizeof(b), "NOW:%s  OK:set", nows);
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextColor(sent >= 0 ? TFT_GREEN : TFT_DARKGREY, COL_BG);
+  tft.drawString(b, LCD_W - 4, 5, 1);
+}
+
+// green bullet = module's current power (telemetry); cyan text = the level we last sent.
+void drawPowerRow(int slot, int idx, bool cursor, uint16_t now_mw, int sent) {
+  int y = LIST_ROW_Y0 + slot * LIST_ROW_H;
+  uint16_t bg = cursor ? TFT_NAVY : COL_BG;
+  TFT_eSprite spr(&tft);
+  spr.createSprite(LCD_W, LIST_ROW_H);
+  spr.setTextFont(1);
+  spr.setTextSize(1);
+  spr.fillSprite(bg);
+  if (idx >= 0 && idx < POWER_N) {
+    int cy = LIST_ROW_H / 2;
+    if (now_mw == POWER_MW[idx]) spr.fillCircle(9, cy, 4, TFT_GREEN);
+    else spr.drawCircle(9, cy, 4, TFT_DARKGREY);
+    char b[12];
+    snprintf(b, sizeof(b), "%u mW", POWER_MW[idx]);
+    spr.setTextDatum(ML_DATUM);
+    spr.setTextColor(idx == sent ? TFT_CYAN : TFT_WHITE, bg);
+    spr.drawString(b, 22, cy, 2);
+  }
+  spr.pushSprite(0, y - LIST_ROW_H / 2);
+  spr.deleteSprite();
+}
+
+void drawPowerVisible(int scroll, int cursor, uint16_t now_mw, int sent) {
+  for (int s = 0; s < LIST_VISIBLE; ++s) {
+    int idx = scroll + s;
+    drawPowerRow(s, idx, idx == cursor, now_mw, sent);
+  }
+}
+
+void drawPowerFull(int scroll, int cursor, uint16_t now_mw, int sent) {
+  drawPowerHeader(now_mw, sent);
+  drawPowerVisible(scroll, cursor, now_mw, sent);
 }
 
 // --- Menu item 1: Gimbals position + channel reverse (flip).
@@ -1027,7 +1088,9 @@ void drawWifiSetup() {
 
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
 void configLoop() {
-  enum class Page : uint8_t { List, Gimbals, Toggles, Battery, Telemetry, Crsf, Reboot };
+  enum class Page : uint8_t {
+    List, Gimbals, Toggles, Battery, Telemetry, Crsf, Power, Reboot
+  };
   Page page = Page::List;
   int sel = 0;
   int menu_scroll = 0;  // index of the top visible main-menu row
@@ -1041,6 +1104,10 @@ void configLoop() {
   int te_cursor = 0;   // selected telemetry item
   int te_scroll = 0;   // top visible telemetry row
   int te_tick = 0;     // throttles live value refresh
+  int pw_cursor = 0;   // selected TX-power level
+  int pw_scroll = 0;   // top visible power row
+  int pw_tick = 0;     // throttles the "NOW" telemetry refresh
+  int pw_sent = -1;    // last power level we sent (for the cyan marker)
   bool crsf_confirm = false;  // CRSF page: WiFi-setup confirm dialog
   bool redraw = true;
   EdgeKey ku, kd, kok, kcx;
@@ -1247,6 +1314,44 @@ void configLoop() {
         if (++te_tick >= 4) {  // ~5 Hz live value refresh
           te_tick = 0;
           drawTeleVisible(te_scroll, te_cursor, l, lok);
+        }
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        break;
+      }
+      case Page::Power: {
+        CrsfLink l;
+        bool lok = crsf_get(l);
+        uint16_t now = lok ? crsf_tx_power_mw(l.tx_power) : 0;
+        if (redraw) {
+          if (pw_cursor < pw_scroll) pw_scroll = pw_cursor;
+          if (pw_cursor >= pw_scroll + LIST_VISIBLE) pw_scroll = pw_cursor - LIST_VISIBLE + 1;
+          drawPowerFull(pw_scroll, pw_cursor, now, pw_sent);
+          redraw = false;
+          pw_tick = 0;
+        }
+        if (up && pw_cursor > 0) {
+          pw_cursor--;
+          if (pw_cursor < pw_scroll) pw_scroll = pw_cursor;
+          drawPowerVisible(pw_scroll, pw_cursor, now, pw_sent);
+        }
+        if (dn && pw_cursor < POWER_N - 1) {
+          pw_cursor++;
+          if (pw_cursor >= pw_scroll + LIST_VISIBLE) pw_scroll = pw_cursor - LIST_VISIBLE + 1;
+          drawPowerVisible(pw_scroll, pw_cursor, now, pw_sent);
+        }
+        if (ok) {  // send the power write to the module (confirmed via telemetry NOW)
+          crsf_set_power(pw_cursor);
+          pw_sent = pw_cursor;
+          drawPowerHeader(now, pw_sent);
+          drawPowerVisible(pw_scroll, pw_cursor, now, pw_sent);
+        }
+        if (++pw_tick >= 4) {  // ~5 Hz refresh of the telemetry-reported power
+          pw_tick = 0;
+          drawPowerHeader(now, pw_sent);
+          drawPowerVisible(pw_scroll, pw_cursor, now, pw_sent);
         }
         if (cx) {
           page = Page::List;

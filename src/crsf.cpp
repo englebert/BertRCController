@@ -28,7 +28,12 @@ constexpr uint8_t TYPE_BATTERY_SENSOR = 0x08;   // FC pack V/I/mAh relayed up th
 constexpr uint8_t TYPE_RADIO_ID = 0x3A;         // OpenTX sync (frequent — skip in probe log)
 constexpr uint8_t TYPE_DEVICE_PING = 0x28;      // probe: ask "who's on the bus?"
 constexpr uint8_t TYPE_DEVICE_INFO = 0x29;      // reply to ping: module name + param count
+constexpr uint8_t TYPE_PARAM_WRITE = 0x2D;      // Lua parameter write (e.g. set TX power)
 constexpr uint8_t ADDR_BROADCAST = 0x00;
+
+// "Max Power" Lua field ID (ELRS_POWER_COMMAND). Verified on the Nano TX V2. ELRS assigns
+// field IDs by registration order, so a different firmware/module may need another value.
+constexpr uint8_t POWER_FIELD_ID = 6;
 
 // CRSF 11-bit channel range: 172=min, 992=center, 1811=max.
 constexpr uint16_t CRSF_MIN = 172;
@@ -43,6 +48,8 @@ CrsfLink g_link = {};
 uint16_t g_channels[16] = {0};  // last sent channel values, guarded by g_mux
 int g_arm_state = -1;  // -1 = no ARM toggle mapped, 0 = disarmed, 1 = armed (g_mux)
 uint32_t g_linkstats_ms = 0;  // millis() of the last link-stats frame (g_mux)
+int g_power_idx = 0;      // pending TX-power value to write (g_mux)
+int g_power_repeat = 0;   // remaining times to resend the power write (g_mux)
 // Diagnostic: ping the module + tally/log RX frame types to serial. Left off — testing
 // showed the module streams sync (0x3A) but never answers device pings (0x29) on this
 // half-duplex link, so the CRSF param/command path (incl. WiFi trigger) isn't available;
@@ -160,6 +167,24 @@ void sendPing() {
 // Probe frame-type tally (single-writer in the CRSF task; diagnostics only).
 uint16_t g_pc_sync = 0, g_pc_link = 0, g_pc_echo = 0, g_pc_info = 0, g_pc_other = 0;
 
+// Send a CRSF parameter write to the module's "Max Power" field. value = power index
+// (0=10mW,1=25,2=50,3=100,4=250,5=500,6=1000,7=2000), assuming the module's min power is
+// 10 mW. No device discovery needed — the module acts on the write immediately.
+void sendPowerWrite(uint8_t value) {
+  while (uart.available()) uart.read();  // drain RX (echo/telemetry) before the write
+  uint8_t f[8];
+  f[0] = ADDR_MODULE;       // sync/dest
+  f[1] = 6;                 // frame_size = type+dest+orig+field+value+crc
+  f[2] = TYPE_PARAM_WRITE;  // 0x2D
+  f[3] = ADDR_MODULE;       // dest ext = the TX module (0xEE)
+  f[4] = ADDR_RADIO;        // origin ext = radio handset (0xEA) — module validates this
+  f[5] = POWER_FIELD_ID;    // "Max Power" field
+  f[6] = value;             // power index (into the module's filtered table, min-power = 0)
+  f[7] = crc8_dvb_s2(&f[2], 5);
+  uart.write(f, sizeof(f));
+  uart.flush();
+}
+
 // --- Telemetry parser (fed all RX bytes; validates CRC; ignores our own echo).
 uint8_t rxbuf[64];
 int rxlen = 0;
@@ -248,18 +273,29 @@ void crsfTask(void*) {
   TickType_t last = xTaskGetTickCount();
   uint32_t frameCnt = 0;
   for (;;) {
-    sendRcFrame();
+    // Pending TX-power write? Hold the RC stream for this tick and send the parameter
+    // write on a quiet wire instead — interleaving it with RC channel frames corrupts
+    // the module's parameter parsing on the shared single wire (ELRS param-traffic rule).
     portENTER_CRITICAL(&g_mux);
-    g_link.tx_frames++;
+    int pwr = (g_power_repeat > 0) ? g_power_idx : -1;
+    if (g_power_repeat > 0) g_power_repeat--;
     portEXIT_CRITICAL(&g_mux);
 
-    // Probe: once a second, ping the module and report the RX frame-type tally so we can
-    // tell a real module reply (info) from just our own echo / normal telemetry.
-    if (g_probe && (++frameCnt % TX_RATE_HZ == 0)) {
-      sendPing();
-      Serial.printf("[probe] 1s tally  sync=%u link=%u echo=%u INFO=%u other=%u\n", g_pc_sync,
-                    g_pc_link, g_pc_echo, g_pc_info, g_pc_other);
-      g_pc_sync = g_pc_link = g_pc_echo = g_pc_info = g_pc_other = 0;
+    if (pwr >= 0) {
+      sendPowerWrite((uint8_t)pwr);
+    } else {
+      sendRcFrame();
+      portENTER_CRITICAL(&g_mux);
+      g_link.tx_frames++;
+      portEXIT_CRITICAL(&g_mux);
+
+      // Probe: once a second, ping the module and report the RX frame-type tally.
+      if (g_probe && (++frameCnt % TX_RATE_HZ == 0)) {
+        sendPing();
+        Serial.printf("[probe] 1s tally  sync=%u link=%u echo=%u INFO=%u other=%u\n", g_pc_sync,
+                      g_pc_link, g_pc_echo, g_pc_info, g_pc_other);
+        g_pc_sync = g_pc_link = g_pc_echo = g_pc_info = g_pc_other = 0;
+      }
     }
 
     // Drain everything the module (and our echo) put on the wire.
@@ -313,6 +349,14 @@ bool crsf_telem_online() {
   portEXIT_CRITICAL(&g_mux);
   if (!v) return false;                 // never received link stats
   return (millis() - t) < 1000;         // stale after 1 s without a link-stats frame
+}
+
+void crsf_set_power(int level_index) {
+  if (level_index < 0 || level_index > 7) return;
+  portENTER_CRITICAL(&g_mux);
+  g_power_idx = level_index;
+  g_power_repeat = 6;  // hold RC for ~6 ticks (~24 ms) and send the write on the quiet wire
+  portEXIT_CRITICAL(&g_mux);
 }
 
 uint16_t crsf_tx_power_mw(uint8_t idx) {

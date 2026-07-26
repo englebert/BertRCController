@@ -32,6 +32,12 @@ struct CrsfLink {
 // Map the CRSF TX-power index to milliwatts (0 for unknown index).
 uint16_t crsf_tx_power_mw(uint8_t idx);
 
+// Set the module's Max Power via a CRSF Lua parameter write (no discovery needed).
+// level_index = index into the module's filtered power table (0 = its min power, 25 mW on
+// the Nano TX V2). Queued; the CRSF task holds RC and sends it on a quiet wire. Confirm via
+// crsf_get().tx_power.
+void crsf_set_power(int level_index);
+
 // True while link-stats telemetry is fresh (a link-stats frame within the last ~1 s);
 // false when telemetry has never arrived or has gone stale (link/module offline).
 bool crsf_telem_online();
