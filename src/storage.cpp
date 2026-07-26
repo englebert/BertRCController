@@ -18,6 +18,7 @@ constexpr const char* KEY_WIFI_BOOT = "wifiboot";
 constexpr const char* KEY_TOTAL_FLIGHT = "tflight";
 constexpr const char* KEY_TELEM_SEL = "telemsel";
 constexpr const char* KEY_FAN_THRESH = "fanthr";
+constexpr const char* KEY_CRSF_BAUD = "crsfbaud";
 
 }  // namespace
 
@@ -114,6 +115,15 @@ uint8_t storage_get_fan_thresh() {
 
 void storage_set_fan_thresh(uint8_t v) {
   if (g_open) prefs.putUChar(KEY_FAN_THRESH, v);
+}
+
+uint32_t storage_get_crsf_baud() {
+  if (!g_open) return 400000;
+  return prefs.getULong(KEY_CRSF_BAUD, 400000);
+}
+
+void storage_set_crsf_baud(uint32_t v) {
+  if (g_open) prefs.putULong(KEY_CRSF_BAUD, v);
 }
 
 uint32_t storage_get_total_flight_secs() {

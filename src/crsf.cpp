@@ -10,7 +10,7 @@
 
 namespace {
 
-constexpr uint32_t CRSF_BAUD = 400000;
+constexpr uint32_t CRSF_BAUD_DEFAULT = 400000;
 // 250 Hz, not 500: our vTaskDelayUntil runs on the 1 ms tick, so at a 2 ms (500 Hz)
 // period the ±1 ms jitter collides with the module's telemetry and drops the link
 // intermittently. 250 Hz (4 ms) has enough margin to be rock-solid. The module
@@ -44,6 +44,7 @@ constexpr uint16_t CRSF_MAX = 1811;
 
 HardwareSerial& uart = Serial2;
 TaskHandle_t g_task = nullptr;
+uint32_t g_crsf_baud = CRSF_BAUD_DEFAULT;  // active UART baud (module auto-detects it)
 
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 CrsfLink g_link = {};
@@ -409,7 +410,7 @@ void crsfTask(void*) {
 }  // namespace
 
 bool crsf_start() {
-  uart.begin(CRSF_BAUD, SERIAL_8N1, PIN_CRSF_RX, PIN_CRSF_TX);
+  uart.begin(g_crsf_baud, SERIAL_8N1, PIN_CRSF_RX, PIN_CRSF_TX);
   uart.setTimeout(0);
 
   BaseType_t ok = xTaskCreatePinnedToCore(crsfTask, "crsf", 4096, nullptr,
@@ -418,8 +419,18 @@ bool crsf_start() {
     Serial.println("[crsf] task create FAILED");
     return false;
   }
-  Serial.println("[crsf] UART2 up @ 400000 (AETR, 250 Hz, half-duplex)");
+  Serial.printf("[crsf] UART2 up @ %lu (AETR, 250 Hz, half-duplex)\n",
+                (unsigned long)g_crsf_baud);
   return true;
+}
+
+uint32_t crsf_get_baud() { return g_crsf_baud; }
+
+void crsf_set_baud(uint32_t baud) {
+  g_crsf_baud = baud;
+  // If the link is already up, change the UART live — the module's autobaud re-locks
+  // within ~1-2 s (link drops briefly). Before start, this just seeds crsf_start().
+  if (g_task) uart.updateBaudRate(baud);
 }
 
 bool crsf_get(CrsfLink& out) {

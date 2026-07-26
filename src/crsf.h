@@ -58,6 +58,12 @@ bool crsf_param_write(int field, uint8_t value);
 // crsf_set_power). value = raw option index. Use for settings like the fan threshold.
 void crsf_param_set(int field, int value);
 
+// CRSF UART baud to the module. crsf_set_baud() before crsf_start() seeds the initial baud;
+// after start it changes the UART live (module re-detects via autobaud in ~1-2 s). Use a
+// value the module knows: 400000 or 921600. (Not persisted here — save via storage.)
+uint32_t crsf_get_baud();
+void crsf_set_baud(uint32_t baud);
+
 // True while link-stats telemetry is fresh (a link-stats frame within the last ~1 s);
 // false when telemetry has never arrived or has gone stale (link/module offline).
 bool crsf_telem_online();

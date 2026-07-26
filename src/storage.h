@@ -52,6 +52,10 @@ void storage_set_telem_sel(uint16_t v);
 uint8_t storage_get_fan_thresh();
 void storage_set_fan_thresh(uint8_t v);
 
+// CRSF UART baud to the module (the module auto-detects it). Default 400000.
+uint32_t storage_get_crsf_baud();
+void storage_set_crsf_baud(uint32_t v);
+
 // Total accumulated flight time (persisted). Used by Phase 2.
 uint32_t storage_get_total_flight_secs();
 void storage_add_flight_secs(uint32_t secs);

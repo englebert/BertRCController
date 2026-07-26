@@ -550,8 +550,9 @@ bool toggleOn(int bit);  // fwd decl (defined below)
 
 const char* const MENU_ITEMS[] = {"GIMBALS & TRIM", "TOGGLE MAPPING", "BATTERY INFO",
                                    "TELEMETRY",      "CRSF MODULE",    "TX POWER",
-                                   "FAN",            "REBOOT"};
-constexpr int MENU_N = 8;
+                                   "FAN",            "PACKET RATE",    "BAUD RATE",
+                                   "REBOOT"};
+constexpr int MENU_N = 10;
 
 struct RawKeys {
   bool up, down, ok, cancel;
@@ -755,12 +756,12 @@ const char* const FAN_OPTS[] = {"10mW",  "25mW",  "50mW",   "100mW", "250mW",
 constexpr int FAN_N = 9;
 constexpr int FAN_FIELD = 8;  // Max Power(6) -> Dynamic(7) -> Fan Thresh(8) on ELRS 3.4.x
 
-void drawFanHeader(int field, int sent) {
+void drawSettingHeader(const char* title, int sent) {
   tft.fillRect(0, 0, LCD_W, 12, COL_BG);
   tft.setTextPadding(0);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("FAN THRESHOLD", 4, 5, 1);
+  tft.drawString(title, 4, 5, 1);
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(sent >= 0 ? TFT_GREEN : TFT_DARKGREY, COL_BG);
   tft.drawString(sent >= 0 ? "SAVED" : "OK:set  CXL:back", LCD_W - 4, 5, 1);
@@ -787,14 +788,36 @@ void drawFanRow(int slot, const char* label, bool cursor, bool is_current, bool 
   spr.deleteSprite();
 }
 
-void drawFanList(int scroll, int cursor, const char* const* labels, int n, int current,
-                 int sent, int field) {
-  drawFanHeader(field, sent);
+void drawSettingList(const char* title, int scroll, int cursor, const char* const* labels,
+                     int n, int current, int sent) {
+  drawSettingHeader(title, sent);
   for (int s = 0; s < LIST_VISIBLE; ++s) {
     int idx = scroll + s;
     drawFanRow(s, idx < n ? labels[idx] : nullptr, idx == cursor, idx == current, idx == sent);
   }
 }
+
+// --- Menu item: PACKET RATE (ELRS field 1). value = list index; verified via telemetry
+// rf_Mode. NOTE: at 400000 baud on this half-duplex module, rates above 333Hz are capped by
+// the module — the green dot (actual rf_Mode) reveals it. Use BAUD 921600 to unlock them. ---
+const char* const PKT_OPTS[] = {"50Hz",  "100Hz FULL", "150Hz", "250Hz",  "333Hz FULL",
+                                "500Hz", "D250",       "D500",  "F500",   "F1000"};
+constexpr int PKT_N = 10;
+// rf_Mode (LinkStatistics enum_rate) the module reports for each option index above.
+const uint8_t PKT_RFMODE[PKT_N] = {2, 4, 5, 7, 8, 9, 10, 11, 12, 13};
+
+// Index of the option whose rf_Mode matches the module's reported rate (-1 if unknown).
+int pktCurrentIndex(uint8_t rf_mode, bool link_ok) {
+  if (!link_ok) return -1;
+  for (int i = 0; i < PKT_N; ++i)
+    if (PKT_RFMODE[i] == rf_mode) return i;
+  return -1;
+}
+
+// --- Menu item: BAUD RATE (handset UART; module auto-detects). ---
+const char* const BAUD_OPTS[] = {"400000", "921600"};
+const uint32_t BAUD_VALS[] = {400000, 921600};
+constexpr int BAUD_N = 2;
 
 // --- Menu item 1: Gimbals position + channel reverse (flip).
 // Toggle5 ON = edit mode: pitch up/down moves the cursor, roll-right (OK) flips the
@@ -1054,10 +1077,7 @@ void drawCrsfStatic() {
   tft.drawString("LINK", 4, 32, 1);
   tft.drawString("LQ", 4, 44, 1);
   tft.drawString("RSSI", 4, 56, 1);
-  tft.drawString("RATE", 4, 68, 1);
-  // Static value: our fixed link config.
-  tft.setTextColor(TFT_WHITE, COL_BG);
-  tft.drawString("250 Hz  400k", 70, 68, 1);
+  tft.drawString("RATE", 4, 68, 1);  // value (baud + actual RF rate) drawn dynamically
 }
 
 void drawCrsfVal(int y, const char* s, uint16_t col) {
@@ -1071,9 +1091,26 @@ void drawCrsfVal(int y, const char* s, uint16_t col) {
 void drawCrsfDynamic(bool force) {
   static uint32_t prev_rx = 0;
   static int last_online = -1, last_link = -1, last_lq = -999, last_rssi = -999;
+  static uint32_t last_baud = 0;
+  static int last_rf = -999;
   CrsfLink l;
   crsf_get(l);
   char b[20];
+
+  // RATE: actual UART baud + the RF rate the module reports (rf_Mode). Updates when the
+  // BAUD menu changes the wire speed or the PACKET RATE menu changes the RF rate.
+  uint32_t baud = crsf_get_baud();
+  int rf = (l.valid && l.up_lq > 0) ? l.rf_mode : -1;
+  if (force || baud != last_baud || rf != last_rf) {
+    last_baud = baud;
+    last_rf = rf;
+    int pi = pktCurrentIndex((uint8_t)l.rf_mode, l.valid && l.up_lq > 0);
+    char rate[10];
+    if (pi >= 0) snprintf(rate, sizeof(rate), "%s", PKT_OPTS[pi]);
+    else snprintf(rate, sizeof(rate), "--");
+    snprintf(b, sizeof(b), "%luk %s", (unsigned long)(baud / 1000), rate);
+    drawCrsfVal(68, b, TFT_WHITE);
+  }
 
   // MODULE: is the TX module sending anything back (sync/telemetry frames)?
   int online = (l.rx_frames != prev_rx) ? 1 : 0;
@@ -1149,7 +1186,7 @@ void drawWifiSetup() {
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
 void configLoop() {
   enum class Page : uint8_t {
-    List, Gimbals, Toggles, Battery, Telemetry, Crsf, Power, Fan, Reboot
+    List, Gimbals, Toggles, Battery, Telemetry, Crsf, Power, Fan, PktRate, Baud, Reboot
   };
   Page page = Page::List;
   int sel = 0;
@@ -1170,6 +1207,8 @@ void configLoop() {
   int pw_sent = -1;    // last power level we sent (for the cyan marker)
   int fan_cursor = 0, fan_scroll = 0, fan_sent = -1;  // FAN page (blind write to field 8)
   int fan_current = -2;  // last-written threshold (green dot); -2 = not yet loaded from NVS
+  int pkt_cursor = 0, pkt_scroll = 0, pkt_sent = -1, pkt_tick = 0;  // PACKET RATE page
+  int baud_cursor = 0, baud_scroll = 0, baud_sent = -1;            // BAUD RATE page
   bool crsf_confirm = false;  // CRSF page: WiFi-setup confirm dialog
   bool redraw = true;
   EdgeKey ku, kd, kok, kcx;
@@ -1430,25 +1469,100 @@ void configLoop() {
           }
           if (fan_cursor < fan_scroll) fan_scroll = fan_cursor;
           if (fan_cursor >= fan_scroll + LIST_VISIBLE) fan_scroll = fan_cursor - LIST_VISIBLE + 1;
-          drawFanList(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent, FAN_FIELD);
+          drawSettingList("FAN THRESHOLD", fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
           redraw = false;
         }
         if (up && fan_cursor > 0) {
           fan_cursor--;
           if (fan_cursor < fan_scroll) fan_scroll = fan_cursor;
-          drawFanList(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent, FAN_FIELD);
+          drawSettingList("FAN THRESHOLD", fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
         }
         if (dn && fan_cursor < FAN_N - 1) {
           fan_cursor++;
           if (fan_cursor >= fan_scroll + LIST_VISIBLE) fan_scroll = fan_cursor - LIST_VISIBLE + 1;
-          drawFanList(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent, FAN_FIELD);
+          drawSettingList("FAN THRESHOLD", fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
         }
         if (ok) {  // blind write the selected threshold (field 8, raw option index) + remember it
           safeSaveFanThresh((uint8_t)fan_cursor);
           crsf_param_set(FAN_FIELD, fan_cursor);
           fan_sent = fan_cursor;
           fan_current = fan_cursor;  // green dot moves to the new setting
-          drawFanList(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent, FAN_FIELD);
+          drawSettingList("FAN THRESHOLD", fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
+        }
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        break;
+      }
+      case Page::PktRate: {
+        CrsfLink l;
+        bool lok = crsf_get(l);
+        int cur = pktCurrentIndex(l.rf_mode, lok);  // actual rate from telemetry rf_Mode
+        if (redraw) {
+          if (pkt_cursor < pkt_scroll) pkt_scroll = pkt_cursor;
+          if (pkt_cursor >= pkt_scroll + LIST_VISIBLE) pkt_scroll = pkt_cursor - LIST_VISIBLE + 1;
+          drawSettingList("PACKET RATE", pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
+          redraw = false;
+          pkt_tick = 0;
+        }
+        if (up && pkt_cursor > 0) {
+          pkt_cursor--;
+          if (pkt_cursor < pkt_scroll) pkt_scroll = pkt_cursor;
+          drawSettingList("PACKET RATE", pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
+        }
+        if (dn && pkt_cursor < PKT_N - 1) {
+          pkt_cursor++;
+          if (pkt_cursor >= pkt_scroll + LIST_VISIBLE) pkt_scroll = pkt_cursor - LIST_VISIBLE + 1;
+          drawSettingList("PACKET RATE", pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
+        }
+        if (ok) {  // write field 1 = list index (module may clamp at 400k baud; see rf_Mode)
+          crsf_param_set(1, pkt_cursor);
+          pkt_sent = pkt_cursor;
+          drawSettingList("PACKET RATE", pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
+        }
+        if (++pkt_tick >= 4) {  // refresh the green "actual rate" dot from telemetry
+          pkt_tick = 0;
+          drawSettingList("PACKET RATE", pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
+        }
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        break;
+      }
+      case Page::Baud: {
+        // Current = the option matching the active baud.
+        int cur = -1;
+        for (int i = 0; i < BAUD_N; ++i)
+          if (BAUD_VALS[i] == crsf_get_baud()) cur = i;
+        if (redraw) {
+          baud_scroll = 0;
+          if (cur >= 0) baud_cursor = cur;
+          drawSettingList("BAUD RATE", baud_scroll, baud_cursor, BAUD_OPTS, BAUD_N, cur, baud_sent);
+          redraw = false;
+        }
+        if (up && baud_cursor > 0) {
+          baud_cursor--;
+          drawSettingList("BAUD RATE", baud_scroll, baud_cursor, BAUD_OPTS, BAUD_N, cur, baud_sent);
+        }
+        if (dn && baud_cursor < BAUD_N - 1) {
+          baud_cursor++;
+          drawSettingList("BAUD RATE", baud_scroll, baud_cursor, BAUD_OPTS, BAUD_N, cur, baud_sent);
+        }
+        if (ok) {  // persist + apply live (module autobaud re-locks in ~1-2 s)
+          uint32_t b = BAUD_VALS[baud_cursor];
+          crsf_pause();
+          gimbals_pause();
+          switches_pause();
+          storage_set_crsf_baud(b);
+          switches_resume();
+          gimbals_resume();
+          crsf_resume();
+          crsf_set_baud(b);
+          baud_sent = baud_cursor;
+          drawSettingList("BAUD RATE", baud_scroll, baud_cursor, BAUD_OPTS, BAUD_N, baud_cursor,
+                          baud_sent);
         }
         if (cx) {
           page = Page::List;
@@ -1577,6 +1691,7 @@ void appTask(void*) {
   storage_init();
   gconfig_init();  // load per-channel flip flags (default none) before CRSF uses them
   g_telemSel = storage_get_telem_sel();  // which telemetry items show on the RC screen
+  crsf_set_baud(storage_get_crsf_baud());  // seed the CRSF baud before crsf_start()
 
   tft.init();
   tft.setRotation(PANEL_ROTATION);
