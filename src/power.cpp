@@ -11,11 +11,11 @@ namespace {
 
 constexpr uint8_t INA226_ADDR = 0x40;
 
-// Shunt design (see CLAUDE.md): 0.05 ohm, current_LSB ~50 uA.
-// The theoretical FS is 1.6384 A (81.92 mV), but the library caps shunt*maxCurrent at
-// 81.9 mV, so we use 1.637 A (81.85 mV). LSB = 1.637/32768 = 49.96 uA (~spec).
-constexpr float SHUNT_OHMS = 0.05f;
-constexpr float MAX_CURRENT_A = 1.637f;
+// Shunt design (see CLAUDE.md): 0.025 ohm — two 0.05 ohm resistors in PARALLEL to double
+// the current range. The theoretical FS is 3.2768 A (81.92 mV), but the library caps
+// shunt*maxCurrent at 81.9 mV, so we use 3.274 A (81.85 mV). LSB = 3.274/32768 = 99.9 uA.
+constexpr float SHUNT_OHMS = 0.025f;
+constexpr float MAX_CURRENT_A = 3.274f;
 
 // Bus-voltage calibration: single-point gain trim so the reading matches a meter.
 // Measured meter 6.70 V vs INA226 6.21 V -> 6.70/6.21. NOTE: this corrects a constant
@@ -66,13 +66,13 @@ bool power_start() {
     Serial.println("[power] INA226 not found at 0x40");
     // Still start the task so the UI shows a clear "no sensor" state if it appears later.
   } else {
-    // normalize=false keeps the spec's exact 50 uA current LSB (81.92 mV @ 1.6384 A).
+    // normalize=false keeps a clean ~100 uA current LSB (81.85 mV @ 3.274 A).
     int rc = ina.setMaxCurrentShunt(MAX_CURRENT_A, SHUNT_OHMS, false);
     if (rc != INA226_ERR_NONE) {
       Serial.printf("[power] setMaxCurrentShunt rc=0x%04X\n", rc);
     }
     ina.setAverage(INA226_16_SAMPLES);  // ~35 ms conversion, smooths handset bursts
-    Serial.println("[power] INA226 configured (0.05 ohm, FS 1.637 A)");
+    Serial.println("[power] INA226 configured (0.025 ohm, FS 3.274 A)");
   }
 
   BaseType_t ok = xTaskCreatePinnedToCore(powerTask, "power", 3072, nullptr,

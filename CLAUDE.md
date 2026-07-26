@@ -124,10 +124,12 @@ INT A/B available if interrupt-driven reads are preferred over polling.
 Lib: `Adafruit_MCP23X17`.
 
 **INA226** — high-side sense on the main power path.
-- Shunt **0.05 Ω** → full-scale **1.64 A**, current LSB **0.05 mA**
-- **1.64 A is a hard ceiling.** Handset TX bursts can approach it; readings pin rather
-  than clip gracefully. Flag in telemetry when within ~10% of full-scale.
-- Set the Calibration register from `R_shunt = 0.05` and `current_LSB = 50 µA`;
+- Shunt **0.025 Ω** (two 0.05 Ω in **parallel**, for double the range) → full-scale
+  **~3.28 A**, current LSB **~0.1 mA**. Configured in `power.cpp`: `SHUNT_OHMS=0.025`,
+  `MAX_CURRENT_A=3.274` (library caps shunt×maxCurrent at 81.9 mV, so 3.274 A ≈ 81.85 mV).
+- **~3.28 A is the ceiling.** Handset TX bursts sit well under it now; readings pin rather
+  than clip gracefully. `near_full` flags within ~10% of full-scale.
+- Set the Calibration register from `R_shunt = 0.025` and `current_LSB ≈ 100 µA`;
   set averaging + conversion time in CONFIG.
 - Bus voltage read directly (0–36 V range). There is **no** ADC voltage divider.
 - Lib: `INA226` (Rob Tillaart) or direct register access.
@@ -208,7 +210,7 @@ src/
   pitch **33**, roll **35** (all verified tracking). GPIO32 is dead; GPIO39 spare.
 - Battery sensing via INA226 only — no resistor divider, GPIO36 free
 - Switches on MCP23017 over I2C — no ESP32 GPIO, no external pull-ups needed
-- INA226 shunt: 0.05 Ω
+- INA226 shunt: 0.025 Ω (2× 0.05 Ω in parallel) → ~3.28 A full-scale
 - CRSF series resistor: 1k
 - Backlight on GPIO27 with PWM dimming
 - Display: **76x284 ST7789** bar panel. Confirmed on hardware. Rotation 1 (90° CW) →
@@ -263,5 +265,5 @@ ui.cpp) — a busy ADC-DMA/UART ISR during a flash-cache-disabled window panics 
 ## Hardware notes (context, not code)
 - ELRS module needs **7–13 V from the pack**, not 3.3V. On 2S, avoid 500 mW/1 W when
   the pack sags below 7 V — the module reboots and the link drops.
-- Shunt resistor: 2512 package, 1 W, ≤50 ppm/°C.
+- Shunt: **two** 0.05 Ω 2512 (1 W, ≤50 ppm/°C) in parallel = 0.025 Ω, ~2 W handling.
 - INA226 IN+ = supply side, IN− = load side. Reversed only flips the current sign.

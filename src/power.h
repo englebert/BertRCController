@@ -10,7 +10,7 @@ struct PowerReading {
   float voltage_V;   // pack bus voltage
   float current_mA;  // pack current
   float power_mW;    // pack power
-  bool near_full;    // within ~10% of the INA226 1.64 A full-scale ceiling
+  bool near_full;    // within ~10% of the INA226 ~3.28 A full-scale ceiling
   bool valid;        // false until a good read has happened (sensor present)
 };
 
