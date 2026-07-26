@@ -103,6 +103,15 @@ UART0 pins 1/3 · display MISO (panel is write-only).
   FAN menu (blind write, no telemetry read-back → last value cached in NVS for the green dot).
   Field IDs assume **ELRS 3.4.x** (Max Power=6 ⇒ Fan=8); 3.5.x+ adds "Link Mode" shifting to
   Max Power=7, Fan=9 — re-derive from the working Max Power field if the module is updated.
+- **Packet rate:** 0x2D write to field **1**, value = list index (no shift). SX1280 options:
+  0=50Hz,1=100Full,2=150,3=250,4=333Full,5=500,6=D250,7=D500,8=F500,9=F1000. Verify via
+  telemetry **rf_Mode** (LinkStatistics byte 6 = enum_rate: {2,4,5,7,8,9,10,11,12,13} per index).
+- **Baud (CRSF wire):** ELRS 3.4.x has **no CRSF baud-set command** (speed-proposal frames are
+  dropped). Change our own `Serial2` baud (400000/921600) → the module's autobaud re-locks in
+  ~1-2 s (it re-detects on any bad-packet/disconnect, not just power-on). Persisted in NVS,
+  seeded before `crsf_start()`. **Coupling:** at 400000 on this half-duplex single-wire module
+  the module **caps packet rate at ~333 Hz** (`adjustPacketRateForBaud`) — 500Hz/F1000 need
+  **921600**. The PACKET RATE green dot (actual rf_Mode) and the CRSF page RATE line show it.
 - **Module WiFi mode:** no command path (that route needs the discovery the module refuses).
   Triggered ONLY by the no-CRSF timeout — power-cycle the module while the handset sends zero
   CRSF, and it auto-starts WiFi after its "Auto On WiFi" interval (~60 s; must be enabled,
