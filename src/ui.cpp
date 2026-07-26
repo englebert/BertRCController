@@ -524,9 +524,9 @@ void renderRc() {
   char strip[64];
   buildTeleStrip(strip, sizeof(strip), l);
   TFT_eSprite spr(&tft);
-  spr.createSprite(LCD_W, 12);
+  spr.createSprite(LCD_W, 16);
   spr.fillSprite(TFT_BLACK);
-  spr.setTextFont(1);  // clears the inherited garbage gfxFont — else font-1 text crashes
+  spr.setTextFont(2);  // font 2 (16px) — bigger than the old font-1 strip
   spr.setTextSize(1);
   spr.setTextDatum(ML_DATUM);
   spr.setTextPadding(0);
@@ -534,12 +534,12 @@ void renderRc() {
     // nothing selected — leave the strip blank
   } else if (online) {
     spr.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
-    spr.drawString(strip, 2, 6, 1);
+    spr.drawString(strip, 2, 8, 2);
   } else {
     spr.setTextColor(TFT_RED, TFT_BLACK);
-    spr.drawString(ever ? strip : "NO TELEMETRY", 2, 6, 1);
+    spr.drawString(ever ? strip : "NO TELEMETRY", 2, 8, 2);
   }
-  spr.pushSprite(0, 64);
+  spr.pushSprite(0, 60);
   spr.deleteSprite();
 }
 
