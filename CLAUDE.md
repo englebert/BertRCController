@@ -78,7 +78,8 @@ UART0 pins 1/3 · display MISO (panel is write-only).
 ### UART2 — ELRS / CRSF (half-duplex, single wire)
 - Module: **BetaFPV Nano TX V2** (ExpressLRS 2.4 GHz). Bay pads: `NC · 7–13V · GND · CRSF`
 - One bidirectional CRSF pin. Wiring: `GPIO17 →1k→ CRSF`, `GPIO16 → CRSF` (passive half-duplex)
-- `Serial2`, **400000 baud**, 8N1. Non-inverted 3.3V logic — no inverter, no level shifter
+- `Serial2`, **921600 baud** default (configurable; module auto-detects), 8N1. Non-inverted
+  3.3V logic — no inverter, no level shifter. 921600 unlocks 500Hz/F1000 (400000 caps ~333Hz).
 - Higher rates possible (up to 921600) for F1000 packet rates; both ends must match
 - **Echo:** RX sees its own TX on the shared wire. The CRSF driver MUST discard echoed
   frames (or flush RX after each TX). This is the most likely failure mode in this design.
@@ -227,7 +228,7 @@ src/
   via a viewport. Portrait offset (col 82, row 18); landscape swaps to (18, 82). Colors
   need `invertDisplay(true)`. Geometry lives in `src/display_cfg.h`.
 - Platform: pioarduino `platform-espressif32` 53.03.13 resolves arduino-esp32 **3.1.3** (≥3.0 ✓)
-- CRSF: hand-rolled TX+telemetry, AETR, 400000 baud. Half-duplex echo rejected by
+- CRSF: hand-rolled TX+telemetry, AETR, 921600 baud (default; configurable). Half-duplex echo rejected by
   ignoring inbound type-0x16 frames. All 5 peripheral modules bring-up complete + verified.
 
 ## Channel Map (CRSF, AETR)
@@ -264,7 +265,8 @@ ui.cpp) — a busy ADC-DMA/UART ISR during a flash-cache-disabled window panics 
 3. ~~CRSF library~~ — **RESOLVED**: hand-rolled (`crsf.cpp`). Echo rejection = ignore
    incoming type-0x16 frames (our own TX on the shared wire). Verified: module returns
    0x3A OpenTX-sync frames, crcerr=0.
-4. ~~CRSF baud~~ — **RESOLVED**: 400000.
+4. ~~CRSF baud~~ — **RESOLVED**: 921600 default (was 400000; raised to allow F1000), set in
+   BAUD RATE menu + NVS, module auto-detects.
 5. Display RST: keep GPIO4, or tie to EN and free the pin
 6. SPI clock: 40 vs 80 MHz
 7. Oversample depth: 8× vs 16×

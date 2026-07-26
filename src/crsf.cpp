@@ -10,7 +10,7 @@
 
 namespace {
 
-constexpr uint32_t CRSF_BAUD_DEFAULT = 400000;
+constexpr uint32_t CRSF_BAUD_DEFAULT = 921600;  // unlocks 500Hz/F1000 (400k caps at 333Hz)
 // 250 Hz, not 500: our vTaskDelayUntil runs on the 1 ms tick, so at a 2 ms (500 Hz)
 // period the ±1 ms jitter collides with the module's telemetry and drops the link
 // intermittently. 250 Hz (4 ms) has enough margin to be rock-solid. The module

@@ -118,8 +118,8 @@ void storage_set_fan_thresh(uint8_t v) {
 }
 
 uint32_t storage_get_crsf_baud() {
-  if (!g_open) return 400000;
-  return prefs.getULong(KEY_CRSF_BAUD, 400000);
+  if (!g_open) return 921600;
+  return prefs.getULong(KEY_CRSF_BAUD, 921600);  // default 921600 to allow 500Hz/F1000
 }
 
 void storage_set_crsf_baud(uint32_t v) {
