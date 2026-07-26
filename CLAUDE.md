@@ -84,18 +84,25 @@ UART0 pins 1/3 · display MISO (panel is write-only).
   frames (or flush RX after each TX). This is the most likely failure mode in this design.
 - Telemetry (LQ, RSSI, link stats) returns on the same wire → feed to the UI task
 - Channels: 11-bit packed CRSF, 16 available, **14 used** (4 gimbals + 10 switches)
-- **Module config over CRSF — what works and what doesn't.** The module streams sync
-  (0x3A) but **never answers device pings (0x28→0x29)** over the half-duplex wire, so
-  anything needing *discovery* (reading the parameter tree by name) is a dead end here
-  (verified with the dormant ping probe in `crsf.cpp`, `g_probe`). BUT a blind **parameter
-  WRITE (0x2D) needs no discovery and DOES work** — the module acts on it via the same
-  always-on path that handles RC. Two musts (see `TXPOWER.md`): origin address **0xEA**
-  (not 0xEF), and **hold the RC stream** for ~24 ms and send the write on a quiet wire
-  (interleaving with 250 Hz RC corrupts parsing). Field IDs are firmware-version dependent.
-- **TX power:** set via a 0x2D write to field **6** ("Max Power"), value = index into the
-  module's *filtered* table (0 = its min power). Nano TX V2 min = **25 mW** (no 10 mW), max
-  1000 mW. `crsf_set_power()` + the TX POWER menu; confirmed live from the telemetry TX-power
-  byte. Persists in module config, so send on user action, not every boot.
+- **Module config over CRSF — writes YES, discovery NO (timing, not a gate).** A blind
+  **parameter WRITE (0x2D) works** — fire-and-forget, no reply needed. But **discovery
+  (ping 0x28→info 0x29, read 0x2C→entry 0x2B) never gets a reply** here. Reason (from ELRS
+  source, not a permission gate): the module only clocks queued telemetry out in the return
+  window *right after it receives a frame* (`handleOutput()` runs only after `ProcessPacket()`).
+  Pausing RC to "listen" opens no window, so the reply is generated but never sent. So to
+  read params you'd have to keep RC flowing and read replies interleaved (not yet done); the
+  `crsf_param_scan`/ping-probe scaffolding in `crsf.cpp` is kept for that future fix.
+  **Write musts** (`TXPOWER.md`): origin **0xEA** (not 0xEF); **hold RC ~24 ms** and send on a
+  quiet wire; field IDs are firmware-version dependent. `crsf_param_set(field,value)` is the
+  generic queued write; `crsf_set_power()` routes through it.
+- **TX power:** 0x2D write to field **6** ("Max Power"), value = index into the module's
+  *filtered* table (0 = its min power). Nano TX V2 min = **25 mW** (no 10 mW), max 1000 mW.
+  TX POWER menu; confirmed live from the telemetry TX-power byte. Persists in module config.
+- **Fan:** 0x2D write to field **8** ("Fan Thresh") = the TX power at/above which the fan
+  runs; value = raw option index (NO min-shift, unlike power): 0=10mW … 7=2000mW, 8=NEVER.
+  FAN menu (blind write, no telemetry read-back → last value cached in NVS for the green dot).
+  Field IDs assume **ELRS 3.4.x** (Max Power=6 ⇒ Fan=8); 3.5.x+ adds "Link Mode" shifting to
+  Max Power=7, Fan=9 — re-derive from the working Max Power field if the module is updated.
 - **Module WiFi mode:** no command path (that route needs the discovery the module refuses).
   Triggered ONLY by the no-CRSF timeout — power-cycle the module while the handset sends zero
   CRSF, and it auto-starts WiFi after its "Auto On WiFi" interval (~60 s; must be enabled,
