@@ -54,6 +54,9 @@ ESP32 pins.*
 
 ## Wiring / schematic
 
+> 📎 **Visual version:** [`docs/wiring.html`](docs/wiring.html) — a color-coded (by net)
+> connection diagram; open it in a browser. The ASCII/tables below carry the same info.
+
 ### Overview
 
 ```

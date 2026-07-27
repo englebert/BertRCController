@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BertRCController — Wiring Reference</title>
+<style>
+  :root {
+    --bg: #eef1f4; --card: #ffffff; --ink: #16212a; --muted: #5b6b78;
+    --line: #d3dae0; --line-soft: #e6ebef; --accent: #0d9488;
+    --vbat: #e5484d; --v33: #e08706; --gnd: #6b7a87;
+    --uart: #0d9488; --spi: #2f6be0; --i2c: #9333ea; --adc: #1f9d55;
+    --chip-bg: #f5f7f9;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", "Roboto Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c1116; --card: #151d25; --ink: #dce5eb; --muted: #8496a3;
+      --line: #26313a; --line-soft: #1c252d; --accent: #2dd4bf;
+      --vbat: #ff6b6f; --v33: #f5a524; --gnd: #8496a3;
+      --uart: #2dd4bf; --spi: #5b9bff; --i2c: #c084fc; --adc: #4ade80;
+      --chip-bg: #101820;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0c1116; --card: #151d25; --ink: #dce5eb; --muted: #8496a3;
+    --line: #26313a; --line-soft: #1c252d; --accent: #2dd4bf;
+    --vbat: #ff6b6f; --v33: #f5a524; --gnd: #8496a3;
+    --uart: #2dd4bf; --spi: #5b9bff; --i2c: #c084fc; --adc: #4ade80;
+    --chip-bg: #101820;
+  }
+  :root[data-theme="light"] {
+    --bg: #eef1f4; --card: #ffffff; --ink: #16212a; --muted: #5b6b78;
+    --line: #d3dae0; --line-soft: #e6ebef; --accent: #0d9488;
+    --vbat: #e5484d; --v33: #e08706; --gnd: #6b7a87;
+    --uart: #0d9488; --spi: #2f6be0; --i2c: #9333ea; --adc: #1f9d55;
+    --chip-bg: #f5f7f9;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: var(--sans); line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1000px; margin: 0 auto; padding: 40px 22px 64px; }
+
+  header { border-bottom: 1px solid var(--line); padding-bottom: 20px; margin-bottom: 28px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .16em;
+    text-transform: uppercase; color: var(--accent); margin: 0 0 8px;
+  }
+  h1 { font-size: clamp(26px, 4.5vw, 38px); margin: 0 0 6px; letter-spacing: -.01em; text-wrap: balance; }
+  .sub { color: var(--muted); margin: 0; max-width: 62ch; }
+
+  h2 {
+    font-size: 13px; font-family: var(--mono); letter-spacing: .14em;
+    text-transform: uppercase; color: var(--muted); font-weight: 600;
+    margin: 40px 0 14px; display: flex; align-items: center; gap: 10px;
+  }
+  h2::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  /* ---- power flow ---- */
+  .flow { width: 100%; overflow-x: auto; }
+  .flow svg { display: block; min-width: 640px; width: 100%; height: auto; }
+  .flow .box { fill: var(--card); stroke: var(--line); stroke-width: 1.5; }
+  .flow .lbl { fill: var(--ink); font-family: var(--sans); font-weight: 600; font-size: 15px; }
+  .flow .lbl-sm { fill: var(--muted); font-family: var(--mono); font-size: 12px; }
+  .flow .net { font-family: var(--mono); font-size: 12px; font-weight: 600; }
+
+  /* ---- legend ---- */
+  .legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 6px 0 4px; }
+  .legend span { display: inline-flex; align-items: center; gap: 7px; font-family: var(--mono); font-size: 12.5px; color: var(--muted); }
+  .dot { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+
+  /* ---- connection cards ---- */
+  .grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 16px; }
+  @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } }
+
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px 16px 6px; }
+  .card-head { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+  .card-head h3 { margin: 0; font-size: 16px; letter-spacing: -.01em; }
+  .card-head .tag { font-family: var(--mono); font-size: 11.5px; color: var(--muted); background: var(--chip-bg); border: 1px solid var(--line); padding: 2px 7px; border-radius: 999px; white-space: nowrap; }
+
+  table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 13px; }
+  td { padding: 5px 0; border-top: 1px solid var(--line-soft); vertical-align: middle; }
+  tr:first-child td { border-top: 0; }
+  .from { color: var(--ink); font-weight: 600; white-space: nowrap; }
+  .arrow { color: var(--muted); padding: 0 8px; width: 1%; }
+  .to { color: var(--muted); text-align: right; }
+  .swatch { width: 1%; padding-right: 9px; }
+  .swatch i { display: block; width: 9px; height: 9px; border-radius: 50%; }
+  .note { font-family: var(--mono); font-size: 12px; color: var(--muted); margin: 8px 2px 12px; line-height: 1.45; }
+  .note b { color: var(--ink); font-weight: 600; }
+
+  footer { margin-top: 40px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-family: var(--mono); font-size: 12px; }
+</style>
+</head>
+<body>
+
+<div class="wrap">
+  <header>
+    <p class="eyebrow">BertRCController · hardware</p>
+    <h1>Wiring Reference</h1>
+    <p class="sub">ESP32-WROOM-32 DIY ExpressLRS handset — power distribution and every
+      peripheral connection, color-coded by net. Pin numbers are the ESP32 GPIO.</p>
+  </header>
+
+  <h2>Power distribution</h2>
+  <div class="flow" role="img" aria-label="Power flows from the 2S LiPo through the INA226 high-side shunt, then branches to the ELRS module at 7 to 13 volts and to a 3.3 volt regulator feeding the ESP32 and logic.">
+    <svg viewBox="0 0 920 250" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="ar" markerWidth="9" markerHeight="9" refX="7" refY="4.5" orient="auto">
+          <path d="M0,0 L9,4.5 L0,9 Z" fill="var(--muted)"/>
+        </marker>
+      </defs>
+
+      <!-- battery -->
+      <rect class="box" x="14" y="92" width="150" height="66" rx="9"/>
+      <text class="lbl" x="89" y="120" text-anchor="middle">2S LiPo</text>
+      <text class="lbl-sm" x="89" y="139" text-anchor="middle">7.4–8.4 V</text>
+
+      <!-- INA226 -->
+      <rect class="box" x="238" y="92" width="164" height="66" rx="9"/>
+      <text class="lbl" x="320" y="118" text-anchor="middle">INA226</text>
+      <text class="lbl-sm" x="320" y="137" text-anchor="middle">shunt 0.025 Ω</text>
+
+      <!-- ELRS -->
+      <rect class="box" x="700" y="20" width="206" height="60" rx="9"/>
+      <text class="lbl" x="803" y="45" text-anchor="middle">ELRS TX module</text>
+      <text class="lbl-sm" x="803" y="64" text-anchor="middle">Nano TX V2 · 7–13 V</text>
+
+      <!-- 3v3 reg -->
+      <rect class="box" x="476" y="92" width="150" height="66" rx="9"/>
+      <text class="lbl" x="551" y="120" text-anchor="middle">3.3 V reg</text>
+      <text class="lbl-sm" x="551" y="139" text-anchor="middle">buck / LDO</text>
+
+      <!-- logic -->
+      <rect class="box" x="700" y="170" width="206" height="60" rx="9"/>
+      <text class="lbl" x="803" y="195" text-anchor="middle">ESP32 + logic</text>
+      <text class="lbl-sm" x="803" y="214" text-anchor="middle">TFT · MCP · INA · gimbal ref</text>
+
+      <!-- wires -->
+      <!-- pack -> INA -->
+      <line x1="164" y1="125" x2="230" y2="125" stroke="var(--vbat)" stroke-width="3" marker-end="url(#ar)"/>
+      <text class="net" x="197" y="116" text-anchor="middle" fill="var(--vbat)">+</text>
+      <!-- INA -> reg -->
+      <line x1="402" y1="125" x2="468" y2="125" stroke="var(--vbat)" stroke-width="3" marker-end="url(#ar)"/>
+      <!-- INA branch up to ELRS: go right then up -->
+      <path d="M402,110 L440,110 L440,50 L692,50" fill="none" stroke="var(--vbat)" stroke-width="3" marker-end="url(#ar)"/>
+      <text class="net" x="560" y="42" text-anchor="middle" fill="var(--vbat)">7–13 V</text>
+      <!-- reg -> logic: right then down -->
+      <path d="M626,140 L660,140 L660,200 L692,200" fill="none" stroke="var(--v33)" stroke-width="3" marker-end="url(#ar)"/>
+      <text class="net" x="676" y="176" text-anchor="middle" fill="var(--v33)">3V3</text>
+    </svg>
+  </div>
+  <p class="note"><b>INA226</b> is high-side on the main + rail: <b>IN+</b> = supply,
+    <b>IN−</b> = load (reversing only flips the current sign). <b>GND is common</b> to the
+    pack, module, ESP32, TFT, sensors, and pots.</p>
+
+  <h2>Net colors</h2>
+  <div class="legend">
+    <span><i class="dot" style="background:var(--vbat)"></i>VBAT 7–13 V</span>
+    <span><i class="dot" style="background:var(--v33)"></i>3V3</span>
+    <span><i class="dot" style="background:var(--gnd)"></i>GND</span>
+    <span><i class="dot" style="background:var(--uart)"></i>CRSF / UART</span>
+    <span><i class="dot" style="background:var(--spi)"></i>SPI (TFT)</span>
+    <span><i class="dot" style="background:var(--i2c)"></i>I²C</span>
+    <span><i class="dot" style="background:var(--adc)"></i>ADC (gimbals)</span>
+  </div>
+
+  <h2>Connections</h2>
+  <div class="grid">
+
+    <!-- ELRS -->
+    <div class="card">
+      <div class="card-head"><h3>ELRS module (CRSF)</h3><span class="tag">UART2 · half-duplex</span></div>
+      <table>
+        <tr><td class="swatch"><i style="background:var(--uart)"></i></td><td class="from">GPIO17</td><td class="arrow">→ 1 kΩ →</td><td class="to">CRSF pad</td></tr>
+        <tr><td class="swatch"><i style="background:var(--uart)"></i></td><td class="from">GPIO16</td><td class="arrow">→</td><td class="to">CRSF pad</td></tr>
+        <tr><td class="swatch"><i style="background:var(--vbat)"></i></td><td class="from">pack +</td><td class="arrow">→</td><td class="to">7–13 V</td></tr>
+        <tr><td class="swatch"><i style="background:var(--gnd)"></i></td><td class="from">GND</td><td class="arrow">→</td><td class="to">GND</td></tr>
+      </table>
+      <p class="note">Both pins meet at the one CRSF pad. Non-inverted 3.3 V — no level shifter.</p>
+    </div>
+
+    <!-- TFT -->
+    <div class="card">
+      <div class="card-head"><h3>TFT ST7789</h3><span class="tag">VSPI · write-only</span></div>
+      <table>
+        <tr><td class="swatch"><i style="background:var(--spi)"></i></td><td class="from">GPIO18</td><td class="arrow">→</td><td class="to">SCK</td></tr>
+        <tr><td class="swatch"><i style="background:var(--spi)"></i></td><td class="from">GPIO23</td><td class="arrow">→</td><td class="to">MOSI (silk "SDA")</td></tr>
+        <tr><td class="swatch"><i style="background:var(--spi)"></i></td><td class="from">GPIO5</td><td class="arrow">→</td><td class="to">CS</td></tr>
+        <tr><td class="swatch"><i style="background:var(--spi)"></i></td><td class="from">GPIO19</td><td class="arrow">→</td><td class="to">DC</td></tr>
+        <tr><td class="swatch"><i style="background:var(--spi)"></i></td><td class="from">GPIO4</td><td class="arrow">→</td><td class="to">RST</td></tr>
+        <tr><td class="swatch"><i style="background:var(--spi)"></i></td><td class="from">GPIO27</td><td class="arrow">→</td><td class="to">BLK (LEDC PWM)</td></tr>
+        <tr><td class="swatch"><i style="background:var(--v33)"></i></td><td class="from">3V3</td><td class="arrow">→</td><td class="to">VCC</td></tr>
+        <tr><td class="swatch"><i style="background:var(--gnd)"></i></td><td class="from">GND</td><td class="arrow">→</td><td class="to">GND</td></tr>
+      </table>
+      <p class="note">MISO unused. 76×284 bar panel, rotation 1.</p>
+    </div>
+
+    <!-- MCP23017 -->
+    <div class="card">
+      <div class="card-head"><h3>MCP23017</h3><span class="tag">I²C · 0x20</span></div>
+      <table>
+        <tr><td class="swatch"><i style="background:var(--i2c)"></i></td><td class="from">GPIO21</td><td class="arrow">→</td><td class="to">SDA</td></tr>
+        <tr><td class="swatch"><i style="background:var(--i2c)"></i></td><td class="from">GPIO22</td><td class="arrow">→</td><td class="to">SCL</td></tr>
+        <tr><td class="swatch"><i style="background:var(--gnd)"></i></td><td class="from">A0 / A1 / A2</td><td class="arrow">→</td><td class="to">GND (addr 0x20)</td></tr>
+        <tr><td class="swatch"><i style="background:var(--v33)"></i></td><td class="from">RESET</td><td class="arrow">→</td><td class="to">3V3 (hold high)</td></tr>
+        <tr><td class="swatch"><i style="background:var(--v33)"></i></td><td class="from">VDD</td><td class="arrow">→</td><td class="to">3V3</td></tr>
+        <tr><td class="swatch"><i style="background:var(--gnd)"></i></td><td class="from">VSS</td><td class="arrow">→</td><td class="to">GND</td></tr>
+      </table>
+      <p class="note">GPA0–7 + GPB0–1 drive the 10 switches (below). RESET must stay high.</p>
+    </div>
+
+    <!-- INA226 -->
+    <div class="card">
+      <div class="card-head"><h3>INA226</h3><span class="tag">I²C · 0x40</span></div>
+      <table>
+        <tr><td class="swatch"><i style="background:var(--i2c)"></i></td><td class="from">GPIO21</td><td class="arrow">→</td><td class="to">SDA</td></tr>
+        <tr><td class="swatch"><i style="background:var(--i2c)"></i></td><td class="from">GPIO22</td><td class="arrow">→</td><td class="to">SCL</td></tr>
+        <tr><td class="swatch"><i style="background:var(--gnd)"></i></td><td class="from">A0 / A1</td><td class="arrow">→</td><td class="to">GND (addr 0x40)</td></tr>
+        <tr><td class="swatch"><i style="background:var(--vbat)"></i></td><td class="from">IN+ / IN−</td><td class="arrow">↔</td><td class="to">across shunt</td></tr>
+        <tr><td class="swatch"><i style="background:var(--v33)"></i></td><td class="from">VS</td><td class="arrow">→</td><td class="to">3V3</td></tr>
+      </table>
+      <p class="note">Shunt = <b>two 0.05 Ω</b> 2512 in parallel = <b>0.025 Ω</b> → ~3.28 A FS.
+        One 4.7 kΩ I²C pull-up pair for the whole bus.</p>
+    </div>
+
+    <!-- Gimbals -->
+    <div class="card">
+      <div class="card-head"><h3>Gimbals (pots)</h3><span class="tag">ADC1 · 11 dB</span></div>
+      <table>
+        <tr><td class="swatch"><i style="background:var(--adc)"></i></td><td class="from">GPIO34</td><td class="arrow">← 1 kΩ ←</td><td class="to">throttle wiper</td></tr>
+        <tr><td class="swatch"><i style="background:var(--adc)"></i></td><td class="from">GPIO36</td><td class="arrow">← 1 kΩ ←</td><td class="to">yaw wiper</td></tr>
+        <tr><td class="swatch"><i style="background:var(--adc)"></i></td><td class="from">GPIO33</td><td class="arrow">← 1 kΩ ←</td><td class="to">pitch wiper</td></tr>
+        <tr><td class="swatch"><i style="background:var(--adc)"></i></td><td class="from">GPIO35</td><td class="arrow">← 1 kΩ ←</td><td class="to">roll wiper</td></tr>
+        <tr><td class="swatch"><i style="background:var(--v33)"></i></td><td class="from">3V3 ref</td><td class="arrow">↔</td><td class="to">pot outer legs</td></tr>
+      </table>
+      <p class="note">Each wiper: <b>1 kΩ series + 100 nF to GND</b> (RC low-pass) into the ADC.
+        GPIO32 dead, GPIO39 spare.</p>
+    </div>
+
+    <!-- Switches -->
+    <div class="card">
+      <div class="card-head"><h3>Switches → MCP pins</h3><span class="tag">active-low · pin→GND</span></div>
+      <table>
+        <tr><td class="from">Toggle 1</td><td class="arrow">·</td><td class="to">B3</td><td class="from" style="padding-left:14px">Toggle 6</td><td class="arrow">·</td><td class="to">B2</td></tr>
+        <tr><td class="from">Toggle 2</td><td class="arrow">·</td><td class="to">B5</td><td class="from" style="padding-left:14px">Toggle 7</td><td class="arrow">·</td><td class="to">A0</td></tr>
+        <tr><td class="from">Toggle 3</td><td class="arrow">·</td><td class="to">B4</td><td class="from" style="padding-left:14px">Toggle 8</td><td class="arrow">·</td><td class="to">B7</td></tr>
+        <tr><td class="from">Toggle 4</td><td class="arrow">·</td><td class="to">B0</td><td class="from" style="padding-left:14px">Toggle 9</td><td class="arrow">·</td><td class="to">B6</td></tr>
+        <tr><td class="from">Toggle 5</td><td class="arrow">·</td><td class="to">B1</td><td class="from" style="padding-left:14px">Toggle 10</td><td class="arrow">·</td><td class="to">A7</td></tr>
+      </table>
+      <p class="note">Each switch wired <b>pin → GND</b>, internal pull-ups on (read active-low).
+        6 MCP pins free.</p>
+    </div>
+
+  </div>
+
+  <footer>ESP32-WROOM-32 · BetaFPV Nano TX V2 · arduino-esp32 3.x / PlatformIO — see README.md &amp; CLAUDE.md</footer>
+</div>
+
+</body>
+</html>
