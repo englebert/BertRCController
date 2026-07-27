@@ -557,10 +557,8 @@ void renderRc() {
 bool toggleOn(int bit);  // fwd decl (defined below)
 
 const char* const MENU_ITEMS[] = {"GIMBALS & TRIM", "TOGGLE MAPPING", "BATTERY INFO",
-                                   "TELEMETRY",      "CRSF MODULE",    "TX POWER",
-                                   "FAN",            "PACKET RATE",    "BAUD RATE",
-                                   "REBOOT"};
-constexpr int MENU_N = 10;
+                                   "TELEMETRY",      "CRSF MODULE",    "REBOOT"};
+constexpr int MENU_N = 6;
 
 struct RawKeys {
   bool up, down, ok, cancel;
@@ -704,12 +702,20 @@ void drawTeleFull(int scroll, int cursor, const CrsfLink& l, bool lok) {
 const uint16_t POWER_MW[] = {25, 50, 100, 250, 500, 1000};
 constexpr int POWER_N = 6;
 
-void drawPowerHeader(uint16_t now_mw, int sent) {
-  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
-  tft.setTextPadding(0);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("TX POWER", 4, 5, 1);
+// force = full redraw (clears strip + draws title); otherwise only the NOW/SET status is
+// refreshed, and only when it changes, via text padding (no fillRect) so it never flickers.
+void drawPowerHeader(uint16_t now_mw, int sent, bool force) {
+  static int last_now = -99999, last_sent = -99;
+  if (!force && (int)now_mw == last_now && sent == last_sent) return;
+  last_now = now_mw;
+  last_sent = sent;
+  if (force) {
+    tft.fillRect(0, 0, LCD_W, 12, COL_BG);
+    tft.setTextPadding(0);
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(TFT_YELLOW, COL_BG);
+    tft.drawString("TX POWER", 4, 5, 1);
+  }
   char nows[8];
   if (now_mw) snprintf(nows, sizeof(nows), "%u", now_mw);
   else snprintf(nows, sizeof(nows), "--");
@@ -717,8 +723,10 @@ void drawPowerHeader(uint16_t now_mw, int sent) {
   if (sent >= 0) snprintf(b, sizeof(b), "NOW:%s SET:%u", nows, POWER_MW[sent]);
   else snprintf(b, sizeof(b), "NOW:%s  OK:set", nows);
   tft.setTextDatum(MR_DATUM);
+  tft.setTextPadding(150);
   tft.setTextColor(sent >= 0 ? TFT_GREEN : TFT_DARKGREY, COL_BG);
   tft.drawString(b, LCD_W - 4, 5, 1);
+  tft.setTextPadding(0);
 }
 
 // green bullet = module's current power (telemetry); cyan text = the level we last sent.
@@ -752,7 +760,7 @@ void drawPowerVisible(int scroll, int cursor, uint16_t now_mw, int sent) {
 }
 
 void drawPowerFull(int scroll, int cursor, uint16_t now_mw, int sent) {
-  drawPowerHeader(now_mw, sent);
+  drawPowerHeader(now_mw, sent, true);
   drawPowerVisible(scroll, cursor, now_mw, sent);
 }
 
@@ -796,13 +804,20 @@ void drawFanRow(int slot, const char* label, bool cursor, bool is_current, bool 
   spr.deleteSprite();
 }
 
-void drawSettingList(const char* title, int scroll, int cursor, const char* const* labels,
-                     int n, int current, int sent) {
-  drawSettingHeader(title, sent);
+// Rows only (sprite blits, no header) — use for navigation/telemetry refresh so the header
+// fillRect doesn't flash on every cursor move.
+void drawSettingRows(int scroll, int cursor, const char* const* labels, int n, int current,
+                     int sent) {
   for (int s = 0; s < LIST_VISIBLE; ++s) {
     int idx = scroll + s;
     drawFanRow(s, idx < n ? labels[idx] : nullptr, idx == cursor, idx == current, idx == sent);
   }
+}
+
+void drawSettingList(const char* title, int scroll, int cursor, const char* const* labels,
+                     int n, int current, int sent) {
+  drawSettingHeader(title, sent);  // full redraw (entry / OK) — header fillRect
+  drawSettingRows(scroll, cursor, labels, n, current, sent);
 }
 
 // --- Menu item: PACKET RATE (ELRS field 1). value = list index; verified via telemetry
@@ -1069,93 +1084,76 @@ void drawToggleListFull(int scroll, int cursor, bool editing, int field) {
 }
 
 // --- Menu item 4: CRSF module status (BetaFPV Nano TX V2).
-void drawCrsfStatic() {
-  tft.fillScreen(COL_BG);
+// CRSF MODULE submenu: OUTPUT toggle + links to the module-config pages + WiFi setup.
+const char* const CRSF_ITEMS[] = {"OUTPUT",    "TX POWER",  "FAN THRESHOLD",
+                                  "PACKET RATE", "BAUD RATE", "WIFI SETUP"};
+constexpr int CRSF_N = 6;
+
+// Compact live status (right side): module online + baud / actual RF rate. Change-driven
+// with text padding (no fillRect) so the periodic refresh doesn't flicker.
+void drawCrsfMenuStatus(bool force) {
+  static uint32_t prev_rx = 0;
+  static int last_state = -2;
+  CrsfLink l;
+  crsf_get(l);
+  int online = (l.rx_frames != prev_rx) ? 1 : 0;
+  prev_rx = l.rx_frames;
+  int pi = online ? pktCurrentIndex((uint8_t)l.rf_mode, l.valid && l.up_lq > 0) : -2;
+  int state = online ? (100 + pi) : -1;  // encode online + rate index for change detection
+  if (!force && state == last_state) return;
+  last_state = state;
+  char b[24];
+  if (online) {
+    char rate[10];
+    if (pi >= 0) snprintf(rate, sizeof(rate), "%s", PKT_OPTS[pi]);
+    else snprintf(rate, sizeof(rate), "--");
+    snprintf(b, sizeof(b), "%luk %s", (unsigned long)(crsf_get_baud() / 1000), rate);
+  } else {
+    snprintf(b, sizeof(b), "OFFLINE");
+  }
+  tft.setTextDatum(MR_DATUM);
+  tft.setTextPadding(150);  // overwrite the right-side box in one draw (no separate clear)
+  tft.setTextColor(online ? TFT_GREEN : TFT_RED, COL_BG);
+  tft.drawString(b, LCD_W - 4, 5, 1);
+  tft.setTextPadding(0);
+}
+
+void drawCrsfMenuRow(int slot, int item, bool cursor) {
+  int y = LIST_ROW_Y0 + slot * LIST_ROW_H;
+  uint16_t bg = cursor ? TFT_NAVY : COL_BG;
+  TFT_eSprite spr(&tft);
+  spr.createSprite(LCD_W, LIST_ROW_H);
+  spr.setTextFont(1);
+  spr.setTextSize(1);
+  spr.fillSprite(bg);
+  if (item >= 0 && item < CRSF_N) {
+    int cy = LIST_ROW_H / 2;
+    spr.setTextDatum(ML_DATUM);
+    spr.setTextPadding(0);
+    spr.setTextColor(cursor ? TFT_WHITE : TFT_DARKGREY, bg);
+    spr.drawString(CRSF_ITEMS[item], 10, cy, 2);
+    if (item == 0) {  // OUTPUT shows its ON/OFF state
+      bool on = crsf_output_enabled();
+      spr.setTextDatum(MR_DATUM);
+      spr.setTextColor(on ? TFT_GREEN : TFT_RED, bg);
+      spr.drawString(on ? "ON" : "OFF", LCD_W - 8, cy, 2);
+    }
+  }
+  spr.pushSprite(0, y - LIST_ROW_H / 2);
+  spr.deleteSprite();
+}
+
+void drawCrsfMenu(int scroll, int cursor) {
+  // Full redraw (entry / scroll): header strip + title once, then status + rows.
+  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
   tft.setTextPadding(0);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_YELLOW, COL_BG);
   tft.drawString("CRSF MODULE", 4, 5, 1);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("OK:do  CXL:back", LCD_W - 4, 5, 1);
-  // Static labels (values drawn by drawCrsfDynamic). RSSI row also carries baud + RF rate.
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("MODULE", 4, 18, 1);
-  tft.drawString("LINK", 4, 30, 1);
-  tft.drawString("RSSI", 4, 42, 1);
-}
-
-// One selectable action row (OUTPUT / WIFI SETUP) — navy highlight when it's the cursor.
-void drawCrsfActionRow(int y, const char* label, const char* val, uint16_t valcol, bool sel) {
-  uint16_t bg = sel ? TFT_NAVY : COL_BG;
-  tft.fillRect(0, y - 6, LCD_W, 12, bg);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextPadding(0);
-  tft.setTextColor(sel ? TFT_WHITE : TFT_DARKGREY, bg);
-  tft.drawString(label, 4, y, 1);
-  if (val) {
-    tft.setTextColor(valcol, bg);
-    tft.drawString(val, 90, y, 1);
-  }
-}
-
-void drawCrsfActions(int sel) {
-  bool on = crsf_output_enabled();
-  drawCrsfActionRow(56, "OUTPUT", on ? "ON" : "OFF", on ? TFT_GREEN : TFT_RED, sel == 0);
-  drawCrsfActionRow(68, "WIFI SETUP", nullptr, 0, sel == 1);
-}
-
-void drawCrsfVal(int y, const char* s, uint16_t col) {
-  tft.fillRect(66, y - 6, LCD_W - 66, 12, COL_BG);  // clear value area only
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextPadding(0);
-  tft.setTextColor(col, COL_BG);
-  tft.drawString(s, 70, y, 1);
-}
-
-void drawCrsfDynamic(bool force) {
-  static uint32_t prev_rx = 0;
-  static int last_online = -1, last_link = -1, last_lq = -999, last_rssi = -999;
-  static uint32_t last_baud = 0;
-  static int last_rf = -999;
-  CrsfLink l;
-  crsf_get(l);
-  char b[28];
-
-  // MODULE (y18): is the TX module sending anything back?
-  int online = (l.rx_frames != prev_rx) ? 1 : 0;
-  prev_rx = l.rx_frames;
-  if (force || online != last_online) {
-    last_online = online;
-    drawCrsfVal(18, online ? "ONLINE" : "OFFLINE", online ? TFT_GREEN : TFT_RED);
-  }
-  // LINK (y30): RF link to a bound RX (UP + LQ%, or DOWN).
-  int link = (l.valid && l.up_lq > 0) ? 1 : 0;
-  int lq = l.valid ? l.up_lq : -1;
-  if (force || link != last_link || lq != last_lq) {
-    last_link = link;
-    last_lq = lq;
-    if (link) snprintf(b, sizeof(b), "UP  %d%%", lq);
-    else snprintf(b, sizeof(b), "DOWN");
-    drawCrsfVal(30, b, link ? TFT_GREEN : TFT_DARKGREY);
-  }
-  // RSSI (y42): uplink RSSI + baud + actual RF rate (rf_Mode).
-  int rssi = l.valid ? l.up_rssi : -999;
-  uint32_t baud = crsf_get_baud();
-  int rf = (l.valid && l.up_lq > 0) ? l.rf_mode : -1;
-  if (force || rssi != last_rssi || baud != last_baud || rf != last_rf) {
-    last_rssi = rssi;
-    last_baud = baud;
-    last_rf = rf;
-    int pi = pktCurrentIndex((uint8_t)l.rf_mode, l.valid && l.up_lq > 0);
-    char rate[10], rs[8];
-    if (pi >= 0) snprintf(rate, sizeof(rate), "%s", PKT_OPTS[pi]);
-    else snprintf(rate, sizeof(rate), "--");
-    if (rssi == -999) snprintf(rs, sizeof(rs), "--");
-    else snprintf(rs, sizeof(rs), "%d", rssi);
-    snprintf(b, sizeof(b), "%s  %luk %s", rs, (unsigned long)(baud / 1000), rate);
-    drawCrsfVal(42, b, TFT_WHITE);
+  drawCrsfMenuStatus(true);
+  for (int s = 0; s < LIST_VISIBLE; ++s) {
+    int item = scroll + s;
+    drawCrsfMenuRow(s, item, item == cursor);
   }
 }
 
@@ -1203,8 +1201,10 @@ void drawWifiSetup() {
 
 // Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
 void configLoop() {
+  // Main-menu pages come first (List..Reboot map to menu index via 1+sel); the CRSF
+  // sub-pages follow and are reached only from the CRSF MODULE submenu.
   enum class Page : uint8_t {
-    List, Gimbals, Toggles, Battery, Telemetry, Crsf, Power, Fan, PktRate, Baud, Reboot
+    List, Gimbals, Toggles, Battery, Telemetry, Crsf, Reboot, Power, Fan, PktRate, Baud
   };
   Page page = Page::List;
   int sel = 0;
@@ -1228,7 +1228,7 @@ void configLoop() {
   int pkt_cursor = 0, pkt_scroll = 0, pkt_sent = -1, pkt_tick = 0;  // PACKET RATE page
   int baud_cursor = 0, baud_scroll = 0, baud_sent = -1;            // BAUD RATE page
   bool crsf_confirm = false;  // CRSF page: WiFi-setup confirm dialog
-  int crsf_sel = 0;           // CRSF page action cursor: 0 = OUTPUT toggle, 1 = WIFI SETUP
+  int crsf_sel = 0, crsf_scroll = 0, crsf_tick = 0;  // CRSF submenu cursor/scroll/status-tick
   bool redraw = true;
   EdgeKey ku, kd, kok, kcx;
   const TickType_t period = pdMS_TO_TICKS(50);
@@ -1465,16 +1465,16 @@ void configLoop() {
         if (ok) {  // send the power write to the module (confirmed via telemetry NOW)
           crsf_set_power(pw_cursor);
           pw_sent = pw_cursor;
-          drawPowerHeader(now, pw_sent);
+          drawPowerHeader(now, pw_sent, false);  // change-driven, no flicker
           drawPowerVisible(pw_scroll, pw_cursor, now, pw_sent);
         }
         if (++pw_tick >= 4) {  // ~5 Hz refresh of the telemetry-reported power
           pw_tick = 0;
-          drawPowerHeader(now, pw_sent);
+          drawPowerHeader(now, pw_sent, false);  // only redraws NOW/SET when it changes
           drawPowerVisible(pw_scroll, pw_cursor, now, pw_sent);
         }
         if (cx) {
-          page = Page::List;
+          page = Page::Crsf;
           redraw = true;
         }
         break;
@@ -1494,12 +1494,12 @@ void configLoop() {
         if (up && fan_cursor > 0) {
           fan_cursor--;
           if (fan_cursor < fan_scroll) fan_scroll = fan_cursor;
-          drawSettingList("FAN THRESHOLD", fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
+          drawSettingRows(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
         }
         if (dn && fan_cursor < FAN_N - 1) {
           fan_cursor++;
           if (fan_cursor >= fan_scroll + LIST_VISIBLE) fan_scroll = fan_cursor - LIST_VISIBLE + 1;
-          drawSettingList("FAN THRESHOLD", fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
+          drawSettingRows(fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
         }
         if (ok) {  // blind write the selected threshold (field 8, raw option index) + remember it
           safeSaveFanThresh((uint8_t)fan_cursor);
@@ -1509,7 +1509,7 @@ void configLoop() {
           drawSettingList("FAN THRESHOLD", fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
         }
         if (cx) {
-          page = Page::List;
+          page = Page::Crsf;
           redraw = true;
         }
         break;
@@ -1528,24 +1528,24 @@ void configLoop() {
         if (up && pkt_cursor > 0) {
           pkt_cursor--;
           if (pkt_cursor < pkt_scroll) pkt_scroll = pkt_cursor;
-          drawSettingList("PACKET RATE", pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
+          drawSettingRows(pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
         }
         if (dn && pkt_cursor < PKT_N - 1) {
           pkt_cursor++;
           if (pkt_cursor >= pkt_scroll + LIST_VISIBLE) pkt_scroll = pkt_cursor - LIST_VISIBLE + 1;
-          drawSettingList("PACKET RATE", pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
+          drawSettingRows(pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
         }
         if (ok) {  // write field 1 = list index (module may clamp at 400k baud; see rf_Mode)
           crsf_param_set(1, pkt_cursor);
           pkt_sent = pkt_cursor;
           drawSettingList("PACKET RATE", pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
         }
-        if (++pkt_tick >= 4) {  // refresh the green "actual rate" dot from telemetry
+        if (++pkt_tick >= 4) {  // refresh the green "actual rate" dot from telemetry (rows only)
           pkt_tick = 0;
-          drawSettingList("PACKET RATE", pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
+          drawSettingRows(pkt_scroll, pkt_cursor, PKT_OPTS, PKT_N, cur, pkt_sent);
         }
         if (cx) {
-          page = Page::List;
+          page = Page::Crsf;
           redraw = true;
         }
         break;
@@ -1563,11 +1563,11 @@ void configLoop() {
         }
         if (up && baud_cursor > 0) {
           baud_cursor--;
-          drawSettingList("BAUD RATE", baud_scroll, baud_cursor, BAUD_OPTS, BAUD_N, cur, baud_sent);
+          drawSettingRows(baud_scroll, baud_cursor, BAUD_OPTS, BAUD_N, cur, baud_sent);
         }
         if (dn && baud_cursor < BAUD_N - 1) {
           baud_cursor++;
-          drawSettingList("BAUD RATE", baud_scroll, baud_cursor, BAUD_OPTS, BAUD_N, cur, baud_sent);
+          drawSettingRows(baud_scroll, baud_cursor, BAUD_OPTS, BAUD_N, cur, baud_sent);
         }
         if (ok) {  // persist + apply live (module autobaud re-locks in ~1-2 s)
           uint32_t b = BAUD_VALS[baud_cursor];
@@ -1584,7 +1584,7 @@ void configLoop() {
                           baud_sent);
         }
         if (cx) {
-          page = Page::List;
+          page = Page::Crsf;
           redraw = true;
         }
         break;
@@ -1601,15 +1601,16 @@ void configLoop() {
         }
         break;
       case Page::Crsf: {
-        bool first = redraw;
         if (redraw) {
           if (crsf_confirm) {
             drawWifiConfirm();
           } else {
-            drawCrsfStatic();
-            drawCrsfActions(crsf_sel);
+            if (crsf_sel < crsf_scroll) crsf_scroll = crsf_sel;
+            if (crsf_sel >= crsf_scroll + LIST_VISIBLE) crsf_scroll = crsf_sel - LIST_VISIBLE + 1;
+            drawCrsfMenu(crsf_scroll, crsf_sel);
           }
           redraw = false;
+          crsf_tick = 0;
         }
         if (crsf_confirm) {
           if (ok) {  // enter module WiFi setup: set flag, reboot (CRSF stays off)
@@ -1620,29 +1621,50 @@ void configLoop() {
             crsf_confirm = false;
             redraw = true;
           }
-        } else {
-          drawCrsfDynamic(first);
-          if (up && crsf_sel > 0) {
-            crsf_sel--;
-            drawCrsfActions(crsf_sel);
+          break;
+        }
+        if (up && crsf_sel > 0) {
+          int old = crsf_sel;
+          crsf_sel--;
+          if (crsf_sel < crsf_scroll) {  // scrolled: repaint window; else just two rows
+            crsf_scroll = crsf_sel;
+            drawCrsfMenu(crsf_scroll, crsf_sel);
+          } else {
+            drawCrsfMenuRow(old - crsf_scroll, old, false);
+            drawCrsfMenuRow(crsf_sel - crsf_scroll, crsf_sel, true);
           }
-          if (dn && crsf_sel < 1) {
-            crsf_sel++;
-            drawCrsfActions(crsf_sel);
+        }
+        if (dn && crsf_sel < CRSF_N - 1) {
+          int old = crsf_sel;
+          crsf_sel++;
+          if (crsf_sel >= crsf_scroll + LIST_VISIBLE) {
+            crsf_scroll = crsf_sel - LIST_VISIBLE + 1;
+            drawCrsfMenu(crsf_scroll, crsf_sel);
+          } else {
+            drawCrsfMenuRow(old - crsf_scroll, old, false);
+            drawCrsfMenuRow(crsf_sel - crsf_scroll, crsf_sel, true);
           }
-          if (ok) {
-            if (crsf_sel == 0) {  // toggle RC output on/off
+        }
+        if (ok) {
+          switch (crsf_sel) {
+            case 0:  // OUTPUT toggle
               crsf_set_output(!crsf_output_enabled());
-              drawCrsfActions(crsf_sel);
-            } else {  // WIFI SETUP -> confirm
-              crsf_confirm = true;
-              redraw = true;
-            }
+              drawCrsfMenuRow(crsf_sel - crsf_scroll, crsf_sel, true);
+              break;
+            case 1: page = Page::Power; redraw = true; break;
+            case 2: page = Page::Fan; redraw = true; break;
+            case 3: page = Page::PktRate; redraw = true; break;
+            case 4: page = Page::Baud; redraw = true; break;
+            case 5: crsf_confirm = true; redraw = true; break;  // WIFI SETUP
           }
-          if (cx) {
-            page = Page::List;
-            redraw = true;
-          }
+        }
+        if (cx) {
+          page = Page::List;
+          redraw = true;
+        }
+        if (!redraw && ++crsf_tick >= 6) {  // refresh status only (change-driven, no flicker)
+          crsf_tick = 0;
+          drawCrsfMenuStatus(false);
         }
         break;
       }
