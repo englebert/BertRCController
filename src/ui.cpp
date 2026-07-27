@@ -9,6 +9,7 @@
 #include <Arduino.h>
 #include <TFT_eSPI.h>
 
+#include "ble.h"
 #include "crsf.h"
 #include "display_cfg.h"
 #include "gconfig.h"
@@ -1185,9 +1186,13 @@ void drawToggleListFull(int scroll, int cursor, bool editing, int field) {
 
 // --- Menu item 4: CRSF module status (BetaFPV Nano TX V2).
 // CRSF MODULE submenu: OUTPUT toggle + links to the module-config pages + WiFi setup.
-const char* const CRSF_ITEMS[] = {"OUTPUT",    "TX POWER",  "FAN THRESHOLD",
-                                  "PACKET RATE", "BAUD RATE", "WIFI SETUP"};
-constexpr int CRSF_N = 6;
+const char* const CRSF_ITEMS[] = {"OUTPUT",      "TX POWER",     "FAN THRESHOLD",
+                                  "PACKET RATE", "BAUD RATE",    "BLE JOYSTICK",
+                                  "WIFI SETUP"};
+constexpr int CRSF_N = 7;
+constexpr int CRSF_ITEM_OUTPUT = 0;
+constexpr int CRSF_ITEM_BLE = 5;
+constexpr int CRSF_ITEM_WIFI = 6;
 
 // Compact live status (right side): module online + baud / actual RF rate. Change-driven
 // with text padding (no fillRect) so the periodic refresh doesn't flicker.
@@ -1198,22 +1203,29 @@ void drawCrsfMenuStatus(bool force) {
   crsf_get(l);
   int online = (l.rx_frames != prev_rx) ? 1 : 0;
   prev_rx = l.rx_frames;
+  bool ble = ble_on();
   int pi = online ? pktCurrentIndex((uint8_t)l.rf_mode, l.valid && l.up_lq > 0) : -2;
-  int state = online ? (100 + pi) : -1;  // encode online + rate index for change detection
+  int state = ble ? 200 : (online ? (100 + pi) : -1);  // change detection
   if (!force && state == last_state) return;
   last_state = state;
   char b[24];
-  if (online) {
+  uint16_t col;
+  if (ble) {
+    snprintf(b, sizeof(b), "BLE JOYSTICK");
+    col = TFT_CYAN;
+  } else if (online) {
     char rate[10];
     if (pi >= 0) snprintf(rate, sizeof(rate), "%s", PKT_OPTS[pi]);
     else snprintf(rate, sizeof(rate), "--");
     snprintf(b, sizeof(b), "%luk %s", (unsigned long)(crsf_get_baud() / 1000), rate);
+    col = TFT_GREEN;
   } else {
     snprintf(b, sizeof(b), "OFFLINE");
+    col = TFT_RED;
   }
   tft.setTextDatum(MR_DATUM);
   tft.setTextPadding(150);  // overwrite the right-side box in one draw (no separate clear)
-  tft.setTextColor(online ? TFT_GREEN : TFT_RED, COL_BG);
+  tft.setTextColor(col, COL_BG);
   tft.drawString(b, LCD_W - 4, 5, 1);
   tft.setTextPadding(0);
 }
@@ -1232,10 +1244,15 @@ void drawCrsfMenuRow(int slot, int item, bool cursor) {
     spr.setTextPadding(0);
     spr.setTextColor(cursor ? TFT_WHITE : TFT_DARKGREY, bg);
     spr.drawString(CRSF_ITEMS[item], 10, cy, 2);
-    if (item == 0) {  // OUTPUT shows its ON/OFF state
+    if (item == CRSF_ITEM_OUTPUT) {  // OUTPUT ON/OFF
       bool on = crsf_output_enabled();
       spr.setTextDatum(MR_DATUM);
       spr.setTextColor(on ? TFT_GREEN : TFT_RED, bg);
+      spr.drawString(on ? "ON" : "OFF", LCD_W - 8, cy, 2);
+    } else if (item == CRSF_ITEM_BLE) {  // BLE JOYSTICK ON/OFF
+      bool on = ble_on();
+      spr.setTextDatum(MR_DATUM);
+      spr.setTextColor(on ? TFT_CYAN : TFT_DARKGREY, bg);
       spr.drawString(on ? "ON" : "OFF", LCD_W - 8, cy, 2);
     }
   }
@@ -1755,7 +1772,17 @@ void configLoop() {
             case 2: page = Page::Fan; redraw = true; break;
             case 3: page = Page::PktRate; redraw = true; break;
             case 4: page = Page::Baud; redraw = true; break;
-            case 5: crsf_confirm = true; redraw = true; break;  // WIFI SETUP
+            case CRSF_ITEM_BLE:  // BLE JOYSTICK: on -> start BLE + silence CRSF; off -> resume
+              if (!ble_on()) {
+                ble_set(true);
+                crsf_set_output(false);
+              } else {
+                ble_set(false);
+                crsf_set_output(true);
+              }
+              drawCrsfMenu(crsf_scroll, crsf_sel);  // OUTPUT + BLE rows both changed
+              break;
+            case CRSF_ITEM_WIFI: crsf_confirm = true; redraw = true; break;
           }
         }
         if (cx) {
