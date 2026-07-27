@@ -113,6 +113,11 @@ UART0 pins 1/3 · display MISO (panel is write-only).
   seeded before `crsf_start()`. **Coupling:** at 400000 on this half-duplex single-wire module
   the module **caps packet rate at ~333 Hz** (`adjustPacketRateForBaud`) — 500Hz/F1000 need
   **921600**. The PACKET RATE green dot (actual rf_Mode) and the CRSF page RATE line show it.
+- **BLE gamepad (FPV sim):** `ble.cpp` — the handset presents as a BLE HID gamepad "BertRC"
+  (4 calibrated gimbal axes + 10 toggle buttons, ~50 Hz) via ESP32-BLE-Gamepad + NimBLE 2.x
+  (builds on arduino-esp32 3.1.3). Enabled from CRSF MODULE → BLE JOYSTICK; ON silences CRSF
+  output to save power. NimBLE starts on first enable and stays resident (runtime teardown is
+  crash-prone) — OFF just stops reporting. BT on ADC1 has no conflict (only ADC2 clashes WiFi).
 - **Module WiFi mode:** no command path (that route needs the discovery the module refuses).
   Triggered ONLY by the no-CRSF timeout — power-cycle the module while the handset sends zero
   CRSF, and it auto-starts WiFi after its "Auto On WiFi" interval (~60 s; must be enabled,
