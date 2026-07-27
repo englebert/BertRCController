@@ -433,6 +433,15 @@ uint32_t crsf_get_baud() { return g_crsf_baud; }
 void crsf_set_output(bool on) { g_tx_enabled = on; }
 bool crsf_output_enabled() { return g_tx_enabled; }
 
+uint16_t crsf_toggle_mask() {
+  SwitchState sw;
+  switches_get(sw);
+  uint16_t m = 0;
+  for (int i = 0; i < 10; ++i)
+    if (sw.bits & (1u << TOGGLE_BIT[i])) m |= (uint16_t)(1u << i);
+  return m;
+}
+
 void crsf_set_baud(uint32_t baud) {
   g_crsf_baud = baud;
   // If the link is already up, change the UART live — the module's autobaud re-locks

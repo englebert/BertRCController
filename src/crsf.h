@@ -69,6 +69,9 @@ void crsf_set_baud(uint32_t baud);
 void crsf_set_output(bool on);
 bool crsf_output_enabled();
 
+// Bitmask of the 10 toggles' physical state (bit i = Toggle(i+1) ON). For the RC screen.
+uint16_t crsf_toggle_mask();
+
 // True while link-stats telemetry is fresh (a link-stats frame within the last ~1 s);
 // false when telemetry has never arrived or has gone stale (link/module offline).
 bool crsf_telem_online();

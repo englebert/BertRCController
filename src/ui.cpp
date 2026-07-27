@@ -471,22 +471,42 @@ void buildTeleStrip(char* out, size_t n, const CrsfLink& l) {
   }
 }
 
-void drawRcStatic() {
-  tft.fillScreen(COL_BG);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextPadding(0);
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  tft.drawString("RC", 4, 8, 2);
+uint16_t batteryColor(int pct);  // fwd decls (defined with the battery page, below)
+void drawBatteryIcon(int x, int y, int w, int h, int pct, uint16_t fill);
+
+// Bottom row: the 10 toggle states as cells (ON = green, OFF = dark), sprite-blitted.
+void drawToggleStates(uint16_t mask) {
+  TFT_eSprite spr(&tft);
+  spr.createSprite(LCD_W, 16);
+  spr.setTextFont(1);
+  spr.setTextSize(1);
+  spr.fillSprite(TFT_BLACK);
+  constexpr int CW = LCD_W / 10;  // 28 px per cell
+  for (int i = 0; i < 10; ++i) {
+    int x = i * CW + 1;
+    bool on = mask & (1u << i);
+    uint16_t bg = on ? TFT_GREEN : 0x2965;  // dark grey when off
+    spr.fillRoundRect(x, 1, CW - 2, 14, 2, bg);
+    char n[4];
+    snprintf(n, sizeof(n), "%d", i + 1);
+    spr.setTextDatum(MC_DATUM);
+    spr.setTextColor(on ? TFT_BLACK : TFT_DARKGREY, bg);
+    spr.drawString(n, x + (CW - 2) / 2, 8, 1);
+  }
+  spr.pushSprite(0, 60);
+  spr.deleteSprite();
 }
 
-void renderRc() {
+void drawRcStatic() { tft.fillScreen(COL_BG); }
+
+void renderRc(bool force) {
   PowerReading pr;
   bool ok = power_get(pr);
+  int pct = ok ? batteryPct(pr.voltage_V) : -1;
   char b[16];
 
-  // Top-right banner. "TX OFF" (RC output disabled) overrides the arm state, since we're
-  // not transmitting. Otherwise: red ARMED = motors live; green DISARMED = throttle held
-  // at idle; grey NO ARM = no toggle assigned the ARM function.
+  // Top-right banner. "TX OFF" (output disabled) overrides the arm state; otherwise red
+  // ARMED / green DISARMED / grey NO ARM. Drawn every frame (padding clears it).
   int as = crsf_arm_state();
   const char* at;
   uint16_t ac;
@@ -500,41 +520,44 @@ void renderRc() {
   tft.setTextDatum(MR_DATUM);
   tft.setTextPadding(96);
   tft.setTextColor(ac, TFT_BLACK);
-  tft.drawString(at, LCD_W - 4, 8, 2);
+  tft.drawString(at, LCD_W - 4, 10, 2);
 
-  tft.setTextDatum(MC_DATUM);
-  tft.setTextPadding(120);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  if (ok) snprintf(b, sizeof(b), "%d%%", batteryPct(pr.voltage_V));
-  else snprintf(b, sizeof(b), "--%%");
-  tft.drawString(b, LCD_W / 2, 28, 4);
+  // Small battery icon with % inside (top-left), change-driven.
+  static int last_pct = -999;
+  if (force || pct != last_pct) {
+    last_pct = pct;
+    int p = pct < 0 ? 0 : pct;
+    drawBatteryIcon(2, 2, 28, 18, p, batteryColor(p));
+    snprintf(b, sizeof(b), ok ? "%d%%" : "--", p);
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextColor(TFT_WHITE);  // transparent over the icon fill
+    tft.drawString(b, 16, 10, 1);
+  }
 
-  // Voltage (left) + flight-session MM:SS (right, white while armed).
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextPadding(90);
-  tft.setTextColor(TFT_CYAN, TFT_BLACK);
-  if (ok) snprintf(b, sizeof(b), "%.2f V", pr.voltage_V);
-  else snprintf(b, sizeof(b), "-- V");
-  tft.drawString(b, 4, 50, 2);
+  // Voltage (right of the icon), change-driven.
+  static int last_v = -2;
+  int vi = ok ? (int)(pr.voltage_V * 100 + 0.5f) : -1;
+  if (force || vi != last_v) {
+    last_v = vi;
+    if (ok) snprintf(b, sizeof(b), "%.2fV", pr.voltage_V);
+    else snprintf(b, sizeof(b), "--V");
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextPadding(72);
+    tft.setTextColor(TFT_CYAN, TFT_BLACK);
+    tft.drawString(b, 42, 10, 2);
+  }
 
-  uint32_t s = flightTimerSession();
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextPadding(70);
-  tft.setTextColor(g_fltArmed ? TFT_WHITE : TFT_DARKGREY, TFT_BLACK);
-  snprintf(b, sizeof(b), "%02lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
-  tft.drawString(b, LCD_W - 4, 50, 2);
-
-  // Bottom telemetry strip: selected items, blitted from a sprite so it never flashes.
-  // Green while telemetry is live; RED (stale values, or "NO TELEMETRY") when offline.
+  // Telemetry details (middle), sprite-blitted each frame (values update live). Green when
+  // fresh; RED (stale values, or "NO TELEMETRY") when offline; blank if none selected.
   CrsfLink l;
-  bool ever = crsf_get(l);            // have we ever received link stats?
-  bool online = crsf_telem_online();  // ...and is it still fresh?
+  bool ever = crsf_get(l);
+  bool online = crsf_telem_online();
   char strip[64];
   buildTeleStrip(strip, sizeof(strip), l);
   TFT_eSprite spr(&tft);
   spr.createSprite(LCD_W, 16);
   spr.fillSprite(TFT_BLACK);
-  spr.setTextFont(2);  // font 2 (16px) — bigger than the old font-1 strip
+  spr.setTextFont(2);
   spr.setTextSize(1);
   spr.setTextDatum(ML_DATUM);
   spr.setTextPadding(0);
@@ -547,8 +570,31 @@ void renderRc() {
     spr.setTextColor(TFT_RED, TFT_BLACK);
     spr.drawString(ever ? strip : "NO TELEMETRY", 2, 8, 2);
   }
-  spr.pushSprite(0, 60);
+  spr.pushSprite(0, 30);
   spr.deleteSprite();
+
+  // Flight timer (small, above the toggle row), change-driven.
+  static uint32_t last_s = 0xFFFFFFFFu;
+  static int last_armed = -1;
+  uint32_t s = flightTimerSession();
+  int armed = g_fltArmed ? 1 : 0;
+  if (force || s != last_s || armed != last_armed) {
+    last_s = s;
+    last_armed = armed;
+    snprintf(b, sizeof(b), "%02lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextPadding(48);
+    tft.setTextColor(g_fltArmed ? TFT_WHITE : TFT_DARKGREY, TFT_BLACK);
+    tft.drawString(b, 4, 52, 1);
+  }
+
+  // 10 toggle states (bottom), change-driven sprite.
+  static int last_tm = -1;
+  uint16_t tm = crsf_toggle_mask();
+  if (force || (int)tm != last_tm) {
+    last_tm = tm;
+    drawToggleStates(tm);
+  }
 }
 
 // ---- Config-mode menu system ----
@@ -925,7 +971,7 @@ uint16_t batteryColor(int pct) {
 void drawBatteryIcon(int x, int y, int w, int h, int pct, uint16_t fill) {
   tft.drawRoundRect(x, y, w, h, 3, TFT_WHITE);          // body
   int nubh = h / 2;
-  tft.fillRect(x + w, y + (h - nubh) / 2, 5, nubh, TFT_WHITE);  // terminal
+  tft.fillRect(x + w, y + (h - nubh) / 2, 3, nubh, TFT_WHITE);  // terminal (short tip)
   int ix = x + 3, iy = y + 3, iw = w - 6, ih = h - 6;  // inner
   int fw = iw * constrain(pct, 0, 100) / 100;
   tft.fillRect(ix, iy, fw, ih, fill);
@@ -1727,10 +1773,12 @@ bool toggleOn(int bit) {
 // RC screen loop — runs while Toggle6 is OFF; returns when it goes ON.
 void rcLoop() {
   drawRcStatic();
+  bool first = true;  // force a full paint on the first frame (statics are change-driven)
   const TickType_t period = pdMS_TO_TICKS(200);  // ~5 Hz
   while (!toggleOn(TOGGLE6_BIT)) {
     flightTimerTick();
-    renderRc();
+    renderRc(first);
+    first = false;
     vTaskDelay(period);
   }
 }
