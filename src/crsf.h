@@ -64,6 +64,11 @@ void crsf_param_set(int field, int value);
 uint32_t crsf_get_baud();
 void crsf_set_baud(uint32_t baud);
 
+// Enable/disable RC transmission. When off the CRSF task sends nothing (the drone fails
+// safe); the task keeps running so telemetry RX and re-enable still work. Not persisted.
+void crsf_set_output(bool on);
+bool crsf_output_enabled();
+
 // True while link-stats telemetry is fresh (a link-stats frame within the last ~1 s);
 // false when telemetry has never arrived or has gone stale (link/module offline).
 bool crsf_telem_online();

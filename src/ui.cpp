@@ -484,11 +484,19 @@ void renderRc() {
   bool ok = power_get(pr);
   char b[16];
 
-  // Arm-safety banner (top-right). Red ARMED = motors live; green DISARMED = throttle
-  // held at idle; grey NO ARM = no toggle assigned the ARM function.
+  // Top-right banner. "TX OFF" (RC output disabled) overrides the arm state, since we're
+  // not transmitting. Otherwise: red ARMED = motors live; green DISARMED = throttle held
+  // at idle; grey NO ARM = no toggle assigned the ARM function.
   int as = crsf_arm_state();
-  const char* at = (as < 0) ? "NO ARM" : (as == 0 ? "DISARMED" : "ARMED");
-  uint16_t ac = (as < 0) ? TFT_DARKGREY : (as == 0 ? TFT_GREEN : TFT_RED);
+  const char* at;
+  uint16_t ac;
+  if (!crsf_output_enabled()) {
+    at = "TX OFF";
+    ac = TFT_RED;
+  } else {
+    at = (as < 0) ? "NO ARM" : (as == 0 ? "DISARMED" : "ARMED");
+    ac = (as < 0) ? TFT_DARKGREY : (as == 0 ? TFT_GREEN : TFT_RED);
+  }
   tft.setTextDatum(MR_DATUM);
   tft.setTextPadding(96);
   tft.setTextColor(ac, TFT_BLACK);
@@ -1066,18 +1074,36 @@ void drawCrsfStatic() {
   tft.setTextPadding(0);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("CRSF MODULE", 4, 6, 1);
+  tft.drawString("CRSF MODULE", 4, 5, 1);
   tft.setTextDatum(MR_DATUM);
   tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("OK:WiFi  CXL:back", LCD_W - 4, 6, 1);
-  // Static labels.
+  tft.drawString("OK:do  CXL:back", LCD_W - 4, 5, 1);
+  // Static labels (values drawn by drawCrsfDynamic). RSSI row also carries baud + RF rate.
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("MODULE", 4, 20, 1);
-  tft.drawString("LINK", 4, 32, 1);
-  tft.drawString("LQ", 4, 44, 1);
-  tft.drawString("RSSI", 4, 56, 1);
-  tft.drawString("RATE", 4, 68, 1);  // value (baud + actual RF rate) drawn dynamically
+  tft.drawString("MODULE", 4, 18, 1);
+  tft.drawString("LINK", 4, 30, 1);
+  tft.drawString("RSSI", 4, 42, 1);
+}
+
+// One selectable action row (OUTPUT / WIFI SETUP) — navy highlight when it's the cursor.
+void drawCrsfActionRow(int y, const char* label, const char* val, uint16_t valcol, bool sel) {
+  uint16_t bg = sel ? TFT_NAVY : COL_BG;
+  tft.fillRect(0, y - 6, LCD_W, 12, bg);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextPadding(0);
+  tft.setTextColor(sel ? TFT_WHITE : TFT_DARKGREY, bg);
+  tft.drawString(label, 4, y, 1);
+  if (val) {
+    tft.setTextColor(valcol, bg);
+    tft.drawString(val, 90, y, 1);
+  }
+}
+
+void drawCrsfActions(int sel) {
+  bool on = crsf_output_enabled();
+  drawCrsfActionRow(56, "OUTPUT", on ? "ON" : "OFF", on ? TFT_GREEN : TFT_RED, sel == 0);
+  drawCrsfActionRow(68, "WIFI SETUP", nullptr, 0, sel == 1);
 }
 
 void drawCrsfVal(int y, const char* s, uint16_t col) {
@@ -1095,49 +1121,41 @@ void drawCrsfDynamic(bool force) {
   static int last_rf = -999;
   CrsfLink l;
   crsf_get(l);
-  char b[20];
+  char b[28];
 
-  // RATE: actual UART baud + the RF rate the module reports (rf_Mode). Updates when the
-  // BAUD menu changes the wire speed or the PACKET RATE menu changes the RF rate.
-  uint32_t baud = crsf_get_baud();
-  int rf = (l.valid && l.up_lq > 0) ? l.rf_mode : -1;
-  if (force || baud != last_baud || rf != last_rf) {
-    last_baud = baud;
-    last_rf = rf;
-    int pi = pktCurrentIndex((uint8_t)l.rf_mode, l.valid && l.up_lq > 0);
-    char rate[10];
-    if (pi >= 0) snprintf(rate, sizeof(rate), "%s", PKT_OPTS[pi]);
-    else snprintf(rate, sizeof(rate), "--");
-    snprintf(b, sizeof(b), "%luk %s", (unsigned long)(baud / 1000), rate);
-    drawCrsfVal(68, b, TFT_WHITE);
-  }
-
-  // MODULE: is the TX module sending anything back (sync/telemetry frames)?
+  // MODULE (y18): is the TX module sending anything back?
   int online = (l.rx_frames != prev_rx) ? 1 : 0;
   prev_rx = l.rx_frames;
   if (force || online != last_online) {
     last_online = online;
-    drawCrsfVal(20, online ? "ONLINE" : "OFFLINE", online ? TFT_GREEN : TFT_RED);
+    drawCrsfVal(18, online ? "ONLINE" : "OFFLINE", online ? TFT_GREEN : TFT_RED);
   }
-  // LINK: RF link to a bound receiver (link-stats present with LQ > 0).
+  // LINK (y30): RF link to a bound RX (UP + LQ%, or DOWN).
   int link = (l.valid && l.up_lq > 0) ? 1 : 0;
-  if (force || link != last_link) {
-    last_link = link;
-    drawCrsfVal(32, link ? "UP" : "DOWN", link ? TFT_GREEN : TFT_DARKGREY);
-  }
   int lq = l.valid ? l.up_lq : -1;
-  if (force || lq != last_lq) {
+  if (force || link != last_link || lq != last_lq) {
+    last_link = link;
     last_lq = lq;
-    if (lq < 0) snprintf(b, sizeof(b), "--");
-    else snprintf(b, sizeof(b), "%d %%", lq);
-    drawCrsfVal(44, b, TFT_WHITE);
+    if (link) snprintf(b, sizeof(b), "UP  %d%%", lq);
+    else snprintf(b, sizeof(b), "DOWN");
+    drawCrsfVal(30, b, link ? TFT_GREEN : TFT_DARKGREY);
   }
+  // RSSI (y42): uplink RSSI + baud + actual RF rate (rf_Mode).
   int rssi = l.valid ? l.up_rssi : -999;
-  if (force || rssi != last_rssi) {
+  uint32_t baud = crsf_get_baud();
+  int rf = (l.valid && l.up_lq > 0) ? l.rf_mode : -1;
+  if (force || rssi != last_rssi || baud != last_baud || rf != last_rf) {
     last_rssi = rssi;
-    if (rssi == -999) snprintf(b, sizeof(b), "--");
-    else snprintf(b, sizeof(b), "%d dBm", rssi);
-    drawCrsfVal(56, b, TFT_WHITE);
+    last_baud = baud;
+    last_rf = rf;
+    int pi = pktCurrentIndex((uint8_t)l.rf_mode, l.valid && l.up_lq > 0);
+    char rate[10], rs[8];
+    if (pi >= 0) snprintf(rate, sizeof(rate), "%s", PKT_OPTS[pi]);
+    else snprintf(rate, sizeof(rate), "--");
+    if (rssi == -999) snprintf(rs, sizeof(rs), "--");
+    else snprintf(rs, sizeof(rs), "%d", rssi);
+    snprintf(b, sizeof(b), "%s  %luk %s", rs, (unsigned long)(baud / 1000), rate);
+    drawCrsfVal(42, b, TFT_WHITE);
   }
 }
 
@@ -1210,6 +1228,7 @@ void configLoop() {
   int pkt_cursor = 0, pkt_scroll = 0, pkt_sent = -1, pkt_tick = 0;  // PACKET RATE page
   int baud_cursor = 0, baud_scroll = 0, baud_sent = -1;            // BAUD RATE page
   bool crsf_confirm = false;  // CRSF page: WiFi-setup confirm dialog
+  int crsf_sel = 0;           // CRSF page action cursor: 0 = OUTPUT toggle, 1 = WIFI SETUP
   bool redraw = true;
   EdgeKey ku, kd, kok, kcx;
   const TickType_t period = pdMS_TO_TICKS(50);
@@ -1584,8 +1603,12 @@ void configLoop() {
       case Page::Crsf: {
         bool first = redraw;
         if (redraw) {
-          if (crsf_confirm) drawWifiConfirm();
-          else drawCrsfStatic();
+          if (crsf_confirm) {
+            drawWifiConfirm();
+          } else {
+            drawCrsfStatic();
+            drawCrsfActions(crsf_sel);
+          }
           redraw = false;
         }
         if (crsf_confirm) {
@@ -1599,9 +1622,22 @@ void configLoop() {
           }
         } else {
           drawCrsfDynamic(first);
-          if (ok) {  // OK -> confirm module WiFi setup
-            crsf_confirm = true;
-            redraw = true;
+          if (up && crsf_sel > 0) {
+            crsf_sel--;
+            drawCrsfActions(crsf_sel);
+          }
+          if (dn && crsf_sel < 1) {
+            crsf_sel++;
+            drawCrsfActions(crsf_sel);
+          }
+          if (ok) {
+            if (crsf_sel == 0) {  // toggle RC output on/off
+              crsf_set_output(!crsf_output_enabled());
+              drawCrsfActions(crsf_sel);
+            } else {  // WIFI SETUP -> confirm
+              crsf_confirm = true;
+              redraw = true;
+            }
           }
           if (cx) {
             page = Page::List;

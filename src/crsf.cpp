@@ -45,6 +45,7 @@ constexpr uint16_t CRSF_MAX = 1811;
 HardwareSerial& uart = Serial2;
 TaskHandle_t g_task = nullptr;
 uint32_t g_crsf_baud = CRSF_BAUD_DEFAULT;  // active UART baud (module auto-detects it)
+volatile bool g_tx_enabled = true;  // false = stop transmitting RC (module fails safe)
 
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 CrsfLink g_link = {};
@@ -382,7 +383,10 @@ void crsfTask(void*) {
     if (g_power_repeat > 0) g_power_repeat--;
     portEXIT_CRITICAL(&g_mux);
 
-    if (pwr >= 0) {
+    if (!g_tx_enabled) {
+      // Output disabled from the menu: transmit nothing (module fails safe). Still drain
+      // RX so telemetry/state stays current if the module is still sending.
+    } else if (pwr >= 0) {
       sendPowerWrite((uint8_t)pwr);
     } else {
       sendRcFrame();
@@ -425,6 +429,9 @@ bool crsf_start() {
 }
 
 uint32_t crsf_get_baud() { return g_crsf_baud; }
+
+void crsf_set_output(bool on) { g_tx_enabled = on; }
+bool crsf_output_enabled() { return g_tx_enabled; }
 
 void crsf_set_baud(uint32_t baud) {
   g_crsf_baud = baud;
