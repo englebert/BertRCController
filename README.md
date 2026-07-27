@@ -52,6 +52,118 @@ ESP32 pins.*
 
 ---
 
+## Wiring / schematic
+
+### Overview
+
+```
+              2S LiPo (7.4–8.4 V nominal)
+                     │ +           │ −
+                     ▼             │
+             ┌───────────────┐     │
+             │    INA226      │     │      high-side sense on the main + rail
+             │  IN+     IN−   │     │      shunt 0.025 Ω (two 0.05 Ω in parallel)
+             └───┬───────┬────┘     │
+              +  │       │  switched-+ (load side)
+                 │       ├───────────────► ELRS TX module  "7–13 V" pad
+                 │       │
+                 │       └──► 3.3 V regulator ──► ESP32 · TFT · MCP23017 · INA226(Vs)
+                 │                                 · gimbal reference rail (clean 3.3 V)
+                 │
+        (INA226 VBUS senses the bus voltage; IN+ = supply side, IN− = load side)
+
+        GND is common to everything (pack −, ESP32, module, TFT, sensors, pots).
+```
+
+The **ELRS module runs directly off the pack (7–13 V)** — *not* 3.3 V. Everything else runs
+from a 3.3 V regulator. All grounds are tied together.
+
+### ESP32 ↔ ELRS module (CRSF, half-duplex single wire)
+
+Module bay pads: `NC · 7–13 V · GND · CRSF`. Both ESP32 UART pins meet at the one CRSF pad:
+
+```
+  GPIO17 ──[ 1 kΩ ]──┐
+                     ├──► module CRSF pad
+  GPIO16 ────────────┘
+  pack + ───────────────► module 7–13 V
+  GND ──────────────────► module GND
+```
+
+Non-inverted 3.3 V logic — no inverter, no level shifter. The 1 kΩ series on TX + the shared
+wire form a passive half-duplex bus; the driver rejects its own TX echo.
+
+### ESP32 ↔ TFT (ST7789, VSPI)
+
+| ESP32 | TFT | | ESP32 | TFT |
+|-------|-----|-|-------|-----|
+| GPIO18 | SCK | | GPIO4 | RST |
+| GPIO23 | MOSI (may be silk "SDA") | | GPIO27 | BLK / LED |
+| GPIO5 | CS | | 3V3 | VCC |
+| GPIO19 | DC | | GND | GND |
+
+MISO unused (panel is write-only). 3.3 V native logic — direct connection.
+
+### ESP32 ↔ I²C bus (MCP23017 + INA226)
+
+```
+  GPIO21 (SDA) ──┬── MCP23017 SDA ── INA226 SDA
+  GPIO22 (SCL) ──┼── MCP23017 SCL ── INA226 SCL
+                 └── one 4.7 kΩ pull-up pair to 3.3 V for the whole bus
+```
+
+- **MCP23017** @ `0x20`: `A0/A1/A2 → GND` (address), **`RESET → 3.3 V`** (else it stays in
+  reset), `VDD → 3.3 V`, `VSS → GND`. INTA/INTB unused (polled).
+- **INA226** @ `0x40`: `A0/A1 → GND` (address), `VS → 3.3 V`, `GND → GND`, `IN+ = supply`,
+  `IN− = load` (reversing only flips the current sign).
+- Remove any per-module pull-ups so only the single 4.7 kΩ pair loads the bus.
+
+### Gimbals (4 pots → ADC1)
+
+Each potentiometer: outer legs across the **clean 3.3 V reference rail** and GND; wiper
+through an RC low-pass into the ADC pin:
+
+```
+  3.3 V ──[ pot ]── GND
+             │ wiper
+             ├──[ 1 kΩ ]──► GPIO (34 thr / 36 yaw / 33 pit / 35 roll)
+             │
+           100 nF
+             │
+            GND
+```
+
+11 dB attenuation (full 0–3.3 V swing). Endpoints/center captured by the calibration wizard.
+
+### Switches (10 toggles → MCP23017)
+
+Each switch wired **pin → GND**, with the MCP23017's internal pull-ups enabled
+(`INPUT_PULLUP`), so they read **active-low**:
+
+```
+  MCP GPA0–GPA7, GPB0, GPB1  ──[ switch ]── GND
+```
+
+Toggle → MCP pin map (A0–A7 = bits 0–7, B0–B7 = bits 8–15):
+
+| Toggle | MCP | Toggle | MCP |
+|--------|-----|--------|-----|
+| 1 | B3 | 6 | B2 |
+| 2 | B5 | 7 | A0 |
+| 3 | B4 | 8 | B7 |
+| 4 | B0 | 9 | B6 |
+| 5 | B1 | 10 | A7 |
+
+6 MCP pins remain free.
+
+### Bill of parts (core)
+
+ESP32-WROOM-32 dev board · BetaFPV Nano TX V2 · 76×284 ST7789 · MCP23017 · INA226 ·
+2× 0.05 Ω 1 W 2512 shunt · 4× gimbals · 10× switches · 3.3 V regulator · 1 kΩ (CRSF) ·
+4.7 kΩ ×2 (I²C) · per-gimbal 1 kΩ + 100 nF.
+
+---
+
 ## Build & Flash
 
 Requires [PlatformIO](https://platformio.org/) (CLI). The `esp32` env uses the pioarduino
