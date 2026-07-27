@@ -497,6 +497,26 @@ void drawToggleStates(uint16_t mask) {
   spr.deleteSprite();
 }
 
+// Active stabilization flight mode from the toggle FUNCTION labels + their live state.
+// FUNC_NAMES indices: 2=ANGLE, 3=HORIZ, 4=ACRO. Returns nullptr when no toggle is assigned
+// a stabilization mode; otherwise ACRO is the default with ANGLE/HORIZON taking priority.
+const char* flightModeName() {
+  uint16_t tm = crsf_toggle_mask();
+  bool have = false, angle = false, horizon = false;
+  for (int i = 0; i < 10; ++i) {
+    uint8_t f = gconfig_toggle_func(i);
+    if (f == 2 || f == 3 || f == 4) have = true;
+    if (tm & (1u << i)) {
+      if (f == 2) angle = true;
+      else if (f == 3) horizon = true;
+    }
+  }
+  if (!have) return nullptr;
+  if (angle) return "ANGLE";
+  if (horizon) return "HORIZON";
+  return "ACRO";
+}
+
 void drawRcStatic() { tft.fillScreen(COL_BG); }
 
 void renderRc(bool force) {
@@ -545,6 +565,17 @@ void renderRc(bool force) {
     tft.setTextPadding(72);
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
     tft.drawString(b, 42, 10, 2);
+  }
+
+  // Flight mode (top-center) from the assigned ACRO/ANGLE/HORIZON toggle, change-driven.
+  static const char* last_mode = "?";
+  const char* mode = flightModeName();
+  if (force || mode != last_mode) {
+    last_mode = mode;
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextPadding(70);
+    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
+    tft.drawString(mode ? mode : "", LCD_W / 2, 10, 2);
   }
 
   // Telemetry details (middle), sprite-blitted each frame (values update live). Green when
