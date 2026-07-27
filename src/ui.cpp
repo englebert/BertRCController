@@ -497,24 +497,43 @@ void drawToggleStates(uint16_t mask) {
   spr.deleteSprite();
 }
 
-// Active stabilization flight mode from the toggle FUNCTION labels + their live state.
-// FUNC_NAMES indices: 2=ANGLE, 3=HORIZ, 4=ACRO. Returns nullptr when no toggle is assigned
-// a stabilization mode; otherwise ACRO is the default with ANGLE/HORIZON taking priority.
-const char* flightModeName() {
+// Build the active flight-mode label from the toggle FUNCTION labels + live state.
+// FUNC_NAMES indices: 2=ANGLE 3=HORIZ 4=ACRO 5=AIR 6=TURTLE 7=RTH. RTH and TURTLE are
+// special states that override the display; otherwise the stabilization mode (ANGLE >
+// HORIZON > ACRO default) with " AIR" appended when airmode is on. Returns false (out
+// empty) if no toggle is assigned any flight-mode function; sets the display colour.
+bool flightModeStr(char* out, size_t n, uint16_t* colOut) {
   uint16_t tm = crsf_toggle_mask();
-  bool have = false, angle = false, horizon = false;
+  bool have = false, angle = false, horizon = false, air = false, turtle = false, rth = false;
   for (int i = 0; i < 10; ++i) {
     uint8_t f = gconfig_toggle_func(i);
-    if (f == 2 || f == 3 || f == 4) have = true;
+    if (f >= 2 && f <= 7) have = true;
     if (tm & (1u << i)) {
-      if (f == 2) angle = true;
-      else if (f == 3) horizon = true;
+      switch (f) {
+        case 2: angle = true; break;
+        case 3: horizon = true; break;
+        case 5: air = true; break;
+        case 6: turtle = true; break;
+        case 7: rth = true; break;
+      }
     }
   }
-  if (!have) return nullptr;
-  if (angle) return "ANGLE";
-  if (horizon) return "HORIZON";
-  return "ACRO";
+  if (!have) {
+    out[0] = 0;
+    return false;
+  }
+  if (rth) {
+    snprintf(out, n, "RTH");
+    *colOut = TFT_RED;
+  } else if (turtle) {
+    snprintf(out, n, "TURTLE");
+    *colOut = TFT_ORANGE;
+  } else {
+    const char* stab = angle ? "ANGLE" : (horizon ? "HORIZ" : "ACRO");
+    snprintf(out, n, air ? "%s AIR" : "%s", stab);
+    *colOut = TFT_YELLOW;
+  }
+  return true;
 }
 
 void drawRcStatic() { tft.fillScreen(COL_BG); }
@@ -567,15 +586,19 @@ void renderRc(bool force) {
     tft.drawString(b, 42, 10, 2);
   }
 
-  // Flight mode (top-center) from the assigned ACRO/ANGLE/HORIZON toggle, change-driven.
-  static const char* last_mode = "?";
-  const char* mode = flightModeName();
-  if (force || mode != last_mode) {
-    last_mode = mode;
+  // Flight mode (top-center) from the assigned mode toggles, change-driven.
+  static char last_mode[16] = "?";
+  static uint16_t last_mcol = 0;
+  char mode[16];
+  uint16_t mcol = TFT_YELLOW;
+  flightModeStr(mode, sizeof(mode), &mcol);
+  if (force || strcmp(mode, last_mode) != 0 || mcol != last_mcol) {
+    strcpy(last_mode, mode);
+    last_mcol = mcol;
     tft.setTextDatum(MC_DATUM);
-    tft.setTextPadding(70);
-    tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString(mode ? mode : "", LCD_W / 2, 10, 2);
+    tft.setTextPadding(80);
+    tft.setTextColor(mcol, TFT_BLACK);
+    tft.drawString(mode, LCD_W / 2, 10, 2);
   }
 
   // Telemetry details (middle), sprite-blitted each frame (values update live). Green when
