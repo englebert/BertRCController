@@ -251,7 +251,11 @@ src/
 
 ## Channel Map (CRSF, AETR)
 Built in `crsf.cpp` `buildChannels()`. Gimbal ADC 0..4095 → CRSF 172..1811.
-Toggles are 2-position (172/1811); the toggle→MCP-pin map is `TOGGLE_BIT[]`.
+Toggles are 2-position (172/1811). The toggle→MCP-pin map is **dynamic**: `g_tpin[]` in
+`gconfig.cpp` (NVS key `tpin`), edited in the TOGGLE MAP menu. The pins in the table below
+are only the defaults (original handset wiring) used when nothing is stored. Every reader
+of a toggle (CRSF channels, arm state, BLE buttons, UI special toggles, MCP debug labels)
+goes through `gconfig_toggle_on()` / `gconfig_toggle_pin()` — never hard-code an MCP bit.
 
 | CH | Source | MCP pin (bit) | CH | Source | MCP pin (bit) |
 |----|--------|---------------|----|--------|---------------|
@@ -266,7 +270,14 @@ Toggles are 2-position (172/1811); the toggle→MCP-pin map is `TOGGLE_BIT[]`.
 
 MCP bit numbering: A0–A7 = bits 0–7, B0–B7 = bits 8–15.
 
-Special toggles (read directly by the app/UI task, in addition to their channels):
+**TOGGLE MAP menu** — each toggle row edits PIN → CH → FUNC, saved on the last OK (CXL
+reverts all). PIN: UP/DOWN steps A0..B7/`--`, or just flip the physical switch and its pin
+is captured. Standard build: Toggle6 (menu switch) has only a pin, and a new pin is rejected
+unless it reads ON at save time (prevents locking yourself out of the menu). Pocket build:
+Toggle6 is an ordinary toggle (BOOT button does the menu).
+
+Special toggles (read directly by the app/UI task, in addition to their channels; they
+follow the pin map above, the pins named here are the defaults):
 - **Toggle5 (B1)** ON at power-up → force the gimbal calibration wizard (circle sticks,
   min/max captured, center = (min+max)/2, stored in NVS).
 - **Toggle3 + Toggle4 + Toggle5 (B4, B0, B1)** all ON at power-up → MCP23017 debug screen

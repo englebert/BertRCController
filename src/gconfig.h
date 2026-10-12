@@ -27,6 +27,18 @@ void gconfig_set_cal(const GimbalCal& cal);
 // Falls back to a linear map when no valid calibration is loaded. Matches the UI's calPct.
 uint16_t gconfig_map_crsf(int idx, int raw);
 
+// --- Toggle -> MCP23017 input pin (assigned in the TOGGLE MAP menu) ---
+// Value = MCP bit 0..15 (A0-A7 = 0-7, B0-B7 = 8-15), GPIN_NONE = unassigned (reads OFF).
+static constexpr uint8_t GPIN_NONE = 0xFF;
+uint8_t gconfig_toggle_pin(int toggle);
+void gconfig_set_toggle_pin(int toggle, uint8_t pin);  // update cache
+// Is this toggle ON in a switches bitmask (SwitchState.bits)? Every reader of a toggle's
+// state goes through this, so the pin map is the single source of truth.
+bool gconfig_toggle_on(int toggle, uint16_t bits);
+// Toggle6 is the menu-mode switch in the standard build: it has a pin but no channel or
+// function. POCKETVERSION uses the BOOT button instead, so there it is a normal toggle.
+bool gconfig_toggle_reserved(int toggle);
+
 // --- Toggle -> CRSF channel map. Value = channel 5..16, 0 = unassigned ---
 uint8_t gconfig_toggle_chan(int toggle);          // read (CRSF task)
 void gconfig_set_toggle_chan(int toggle, uint8_t ch);  // update cache
@@ -44,6 +56,6 @@ void gconfig_set_toggle_func(int toggle, uint8_t f);
 // First toggle assigned the given function index, or -1 if none (e.g. find the ARM toggle).
 int gconfig_toggle_with_func(uint8_t f);
 
-// Persist the whole config (flip + toggle map) to NVS. Caller must quiesce ADC/CRSF
+// Persist the whole config (flip + toggle pins/channels/functions) to NVS. Caller must quiesce ADC/CRSF
 // around this (flash write) as with other NVS saves.
 bool gconfig_save();

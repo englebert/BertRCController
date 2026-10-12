@@ -34,6 +34,10 @@ bool storage_save_flip(const bool in[4]);
 bool storage_load_toggles(uint8_t out[10]);
 bool storage_save_toggles(const uint8_t in[10]);
 
+// Toggle -> MCP23017 input pin (0-7 = A0-A7, 8-15 = B0-B7, 0xFF = unassigned).
+bool storage_load_toggle_pins(uint8_t out[10]);
+bool storage_save_toggle_pins(const uint8_t in[10]);
+
 // Toggle -> function label map (index into the UI's function name list; 0 = none).
 bool storage_load_toggle_funcs(uint8_t out[10]);
 bool storage_save_toggle_funcs(const uint8_t in[10]);

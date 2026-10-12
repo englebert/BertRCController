@@ -54,17 +54,22 @@ constexpr float VBAT_MAX = 8.4f;
 // Startup safety: block until throttle is at/below this percent.
 constexpr float THROTTLE_GATE_PCT = 15.0f;
 
-// Toggle6 = mode switch (B2 = MCP bit 10). ON (closed) = configuration mode.
-constexpr int TOGGLE6_BIT = 10;
-// Toggle5 (B1 = MCP bit 9) ON at power-up = force the gimbal calibration wizard.
-constexpr int TOGGLE5_BIT = 9;
+// Special toggles, as toggle indices (0 = Toggle1). Which MCP23017 pin each one reads
+// comes from the gconfig pin map (TOGGLE MAP menu), never a hard-coded bit.
+// Toggle6 = mode switch: ON (closed) = configuration mode (standard build).
+constexpr int TOGGLE6 = 5;
+// Toggle5 ON at power-up = force the gimbal calibration wizard.
+constexpr int TOGGLE5 = 4;
+// Toggle3 + Toggle4 (+ Toggle5) ON at power-up = MCP23017 debug screen.
+constexpr int TOGGLE3 = 2;
+constexpr int TOGGLE4 = 3;
 
 // ---- Menu-mode source ----
 // Standard build: Toggle6's level (ON = configuration mode). POCKETVERSION: each press
 // of the BOOT button (GPIO0, active-low) flips between the RC screen and configuration
 // mode; it always powers up on the RC screen. The press is latched in a GPIO interrupt
 // because the RC loop only wakes every 200 ms and would miss a short tap.
-bool toggleOn(int bit);  // fwd decl (defined below)
+bool toggleOn(int toggle);  // fwd decl (defined below)
 #ifdef POCKETVERSION
 constexpr bool MENU_ON_BOOT_BTN = true;
 constexpr TickType_t MENU_BTN_DEBOUNCE = pdMS_TO_TICKS(250);
@@ -86,7 +91,7 @@ bool menuModeOn() { return g_menuMode; }
 #else
 constexpr bool MENU_ON_BOOT_BTN = false;
 void menuModeInit() {}
-bool menuModeOn() { return toggleOn(TOGGLE6_BIT); }
+bool menuModeOn() { return toggleOn(TOGGLE6); }
 #endif
 
 // Menu-key thresholds (TASK01.md), on the RC microsecond scale 1000..2000 (center
@@ -799,8 +804,6 @@ void renderRc(bool force) {
 // ---- Config-mode menu system ----
 // Navigation via gimbal keys (TASK01.md): pitch >1800us = UP, <1200 = DOWN;
 // roll >1800 = OK (enter), <1200 = CANCEL (back).
-bool toggleOn(int bit);  // fwd decl (defined below)
-
 const char* const MENU_ITEMS[] = {
     lp("GIMBALS & TRIM", "GIMBALS"), lp("TOGGLE MAPPING", "TOGGLES"),
     lp("BATTERY INFO", "BATTERY"),   "TELEMETRY",
@@ -1303,9 +1306,16 @@ void drawBatteryDynamic(bool force) {
   }
 }
 
-// --- Menu item 2: Toggle -> CRSF channel + function (Toggle6 reserved for menu mode).
-const int EDIT_TOGGLE[9] = {0, 1, 2, 3, 4, 6, 7, 8, 9};  // toggle indices, skip Toggle6
-constexpr int EDIT_TOGGLE_N = 9;
+// --- Menu item 2: Toggle -> MCP23017 pin + CRSF channel + function. All 10 toggles are
+// listed; in the standard build Toggle6 (menu-mode switch) only has a pin to assign.
+const int EDIT_TOGGLE[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};  // toggle index per list row
+constexpr int EDIT_TOGGLE_N = 10;
+
+// "A0".."B7" for MCP bit 0..15, "--" when unassigned.
+void pinName(uint8_t pin, char* out, size_t n) {
+  if (pin <= 15) snprintf(out, n, "%c%d", pin < 8 ? 'A' : 'B', pin % 8);
+  else snprintf(out, n, "--");
+}
 
 // Function labels a toggle can be assigned (index stored in gconfig). ARM is special
 // (drives arm-safety + flight timer); the rest are labels the flight controller acts on.
@@ -1323,17 +1333,19 @@ constexpr int TM_ROW_Y0 = HDR_H + TM_ROW_H / 2;
 void drawToggleHeader(bool editing, int field) {
   drawHeaderTitle("TOGGLE MAP");  // clears the header strip only
   const char* hint = !editing       ? lp("OK:edit  CXL:back", "OK:edit")
-                     : (field == 0) ? lp("edit CH   OK:next", "CH   OK:next")
+                     : (field == 0) ? lp("PIN: flip switch or UP/DN", "flip sw/UPDN")
+                     : (field == 1) ? lp("edit CH   OK:next", "CH   OK:next")
                                     : lp("edit FUNC OK:save", "FUNC OK:save");
   drawHeaderHint(hint, TFT_DARKGREY);
 }
 
 // Draw one visible row. slot = visual position 0..TM_VISIBLE-1; eidx = index into
 // EDIT_TOGGLE (or out of range for a blank slot on the last short page).
-// field: 0 = channel, 1 = function (highlighted green when sel && editing).
+// field: 0 = pin, 1 = channel, 2 = function (highlighted green when sel && editing).
+// pin_edit >= 0: the not-yet-committed pin being edited on the selected row.
 // Rendered into an off-screen sprite and blitted once, so a moving cursor never
 // flashes the row as a solid bar between clear and text.
-void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field) {
+void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field, int pin_edit = -1) {
   int y = TM_ROW_Y0 + slot * TM_ROW_H;
   uint16_t bg = sel ? TFT_NAVY : COL_BG;
   TFT_eSprite spr(&tft);
@@ -1345,20 +1357,26 @@ void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field) {
     int t = EDIT_TOGGLE[eidx];
     uint8_t c = gconfig_toggle_chan(t);
     uint8_t fn = gconfig_toggle_func(t);
-    char ts[6], cs[6], fs[10];
+    char ts[6], ps[4], cs[6], fs[10];
     snprintf(ts, sizeof(ts), "T%d", t + 1);
+    pinName((sel && editing && pin_edit >= 0) ? (uint8_t)pin_edit : gconfig_toggle_pin(t), ps,
+            sizeof(ps));
     if (c) snprintf(cs, sizeof(cs), "CH%u", c);
     else snprintf(cs, sizeof(cs), "--");
-    snprintf(fs, sizeof(fs), "%s", FUNC_NAMES[fn < FUNC_COUNT ? fn : 0]);
+    if (gconfig_toggle_reserved(t)) snprintf(fs, sizeof(fs), "MENU");  // the mode switch
+    else snprintf(fs, sizeof(fs), "%s", FUNC_NAMES[fn < FUNC_COUNT ? fn : 0]);
 
     uint16_t base = sel ? TFT_YELLOW : TFT_WHITE;
-    uint16_t chCol = (sel && editing && field == 0) ? TFT_GREEN : base;
-    uint16_t fnCol = (sel && editing && field == 1) ? TFT_GREEN : base;
+    uint16_t pinCol = (sel && editing && field == 0) ? TFT_GREEN : base;
+    uint16_t chCol = (sel && editing && field == 1) ? TFT_GREEN : base;
+    uint16_t fnCol = (sel && editing && field == 2) ? TFT_GREEN : base;
     spr.setTextDatum(ML_DATUM);
     spr.setTextPadding(0);
     spr.setTextColor(base, bg);
-    if (PORTRAIT) {
+    if (PORTRAIT) {  // line 1: toggle ... channel; line 2: pin ... function
       spr.drawString(ts, 2, 8, 2);
+      spr.setTextColor(pinCol, bg);
+      spr.drawString(ps, 2, 24, 2);
       spr.setTextDatum(MR_DATUM);
       spr.setTextColor(chCol, bg);
       spr.drawString(cs, LCD_W - 2, 8, 2);
@@ -1367,10 +1385,12 @@ void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field) {
     } else {
       int cy = TM_ROW_H / 2;  // vertical center inside the sprite
       spr.drawString(ts, 8, cy, 2);
+      spr.setTextColor(pinCol, bg);
+      spr.drawString(ps, 48, cy, 2);
       spr.setTextColor(chCol, bg);
-      spr.drawString(cs, 72, cy, 2);
+      spr.drawString(cs, 96, cy, 2);
       spr.setTextColor(fnCol, bg);
-      spr.drawString(fs, 150, cy, 2);
+      spr.drawString(fs, 160, cy, 2);
     }
   }
   spr.pushSprite(0, y - TM_ROW_H / 2);
@@ -1562,7 +1582,9 @@ void configLoop() {
   int tmcursor = 0;  // selected toggle on the Toggle Mapping page
   int tm_scroll = 0;  // index (into EDIT_TOGGLE) of the top visible row
   bool tm_editing = false;
-  int tm_field = 0;         // 0 = channel, 1 = function (which field OK cycles)
+  int tm_field = 0;         // 0 = pin, 1 = channel, 2 = function (which field OK cycles)
+  uint8_t tm_pin = GPIN_NONE;  // pin being edited; written to gconfig only on save
+  uint16_t tm_lastbits = 0;    // MCP inputs last tick (pin field: detect a flipped switch)
   uint8_t tm_prevchan = 0;  // channel before entering edit (for CANCEL revert)
   uint8_t tm_prevfunc = 0;  // function before entering edit (for CANCEL revert)
   int te_cursor = 0;   // selected telemetry item
@@ -1628,7 +1650,7 @@ void configLoop() {
           drawGimbalPosStatic();
           redraw = false;
         }
-        bool edit = toggleOn(TOGGLE5_BIT);  // Toggle5 gates editing AND back
+        bool edit = toggleOn(TOGGLE5);  // Toggle5 gates editing AND back
         if (edit) {
           if (up && gcursor > 0) gcursor--;
           if (dn && gcursor < 3) gcursor++;
@@ -1680,65 +1702,111 @@ void configLoop() {
           }
           if (ok) {
             tm_editing = true;
-            tm_field = 0;  // start on the channel field
+            tm_field = 0;  // start on the pin field
+            tm_pin = gconfig_toggle_pin(t);
             tm_prevchan = gconfig_toggle_chan(t);
             tm_prevfunc = gconfig_toggle_func(t);
+            SwitchState sw;
+            switches_get(sw);
+            tm_lastbits = sw.bits;
             drawToggleHeader(true, tm_field);
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field, tm_pin);
           }
           if (cx) {
             page = Page::List;
             redraw = true;
           }
-        } else if (tm_field == 0) {
+          break;
+        }
+
+        // ---- Editing the selected toggle: PIN -> CH -> FUNC, saved on the last OK ----
+        auto drawRow = [&]() {
+          drawToggleRow(tmcursor - tm_scroll, tmcursor, true, tm_editing, tm_field,
+                        tm_editing ? tm_pin : -1);
+        };
+        auto endEdit = [&]() {
+          tm_editing = false;
+          tm_field = 0;
+          drawToggleHeader(false, 0);
+          drawRow();
+        };
+        auto cancel = [&]() {  // revert every field (the pin was never applied)
+          gconfig_set_toggle_chan(t, tm_prevchan);
+          gconfig_set_toggle_func(t, tm_prevfunc);
+          endEdit();
+        };
+        auto commit = [&]() {
+          // The standard build's menu switch must stay reachable: only accept a pin that
+          // reads ON right now (we are in menu mode, so its real switch is ON). Anything
+          // else would drop out of the menu with no way back in.
+          if (!MENU_ON_BOOT_BTN && t == TOGGLE6) {
+            SwitchState sw;
+            bool on = tm_pin <= 15 && switches_get(sw) && (sw.bits & (1u << tm_pin));
+            if (!on) {
+              cancel();
+              drawHeaderTitle("TOGGLE MAP");
+              drawHeaderHint(lp("REJECTED: T6 pin must read ON", "T6 not ON!"), TFT_RED);
+              return;
+            }
+          }
+          gconfig_set_toggle_pin(t, tm_pin);
+          safeSaveGconfig();
+          endEdit();
+        };
+
+        if (tm_field == 0) {
+          // Edit PIN: up/down step through A0..B7 and "--" (none); flipping a physical
+          // switch jumps straight to the pin it is wired to. OK = next field.
+          uint8_t before = tm_pin;
+          if (up) tm_pin = (tm_pin > 15) ? 0 : (tm_pin == 15 ? GPIN_NONE : tm_pin + 1);
+          if (dn) tm_pin = (tm_pin > 15) ? 15 : (tm_pin == 0 ? GPIN_NONE : tm_pin - 1);
+          SwitchState sw;
+          if (switches_get(sw)) {
+            uint16_t diff = sw.bits ^ tm_lastbits;
+            tm_lastbits = sw.bits;
+            if (diff && !(diff & (diff - 1))) tm_pin = (uint8_t)__builtin_ctz(diff);
+          }
+          if (tm_pin != before) drawRow();
+          if (ok) {
+            if (gconfig_toggle_reserved(t)) {  // menu switch: the pin is all there is
+              commit();
+            } else {
+              tm_field = 1;
+              drawToggleHeader(true, tm_field);
+              drawRow();
+            }
+          }
+          if (cx) cancel();
+        } else if (tm_field == 1) {
           // Edit CHANNEL: up/down cycle channel; OK advances to function; CXL reverts.
           uint8_t c = gconfig_toggle_chan(t);
           if (up) {  // none -> 5..16 -> none
             gconfig_set_toggle_chan(t, (c == 0) ? 5 : (c >= 16 ? 0 : c + 1));
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
+            drawRow();
           }
           if (dn) {  // none -> 16..5 -> none
             gconfig_set_toggle_chan(t, (c == 0) ? 16 : (c <= 5 ? 0 : c - 1));
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
+            drawRow();
           }
           if (ok) {  // advance to the function field
-            tm_field = 1;
+            tm_field = 2;
             drawToggleHeader(true, tm_field);
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
+            drawRow();
           }
-          if (cx) {  // cancel the whole edit, revert both fields
-            gconfig_set_toggle_chan(t, tm_prevchan);
-            gconfig_set_toggle_func(t, tm_prevfunc);
-            tm_editing = false;
-            drawToggleHeader(false, 0);
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, false, 0);
-          }
+          if (cx) cancel();
         } else {
-          // Edit FUNCTION: up/down cycle label; OK saves both fields; CXL reverts.
+          // Edit FUNCTION: up/down cycle label; OK saves all three fields; CXL reverts.
           uint8_t f = gconfig_toggle_func(t);
           if (up) {
             gconfig_set_toggle_func(t, (uint8_t)((f + 1) % FUNC_COUNT));
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
+            drawRow();
           }
           if (dn) {
             gconfig_set_toggle_func(t, (uint8_t)((f + FUNC_COUNT - 1) % FUNC_COUNT));
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field);
+            drawRow();
           }
-          if (ok) {  // commit channel + function
-            safeSaveGconfig();
-            tm_editing = false;
-            tm_field = 0;
-            drawToggleHeader(false, 0);
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, false, 0);
-          }
-          if (cx) {  // cancel the whole edit, revert both fields
-            gconfig_set_toggle_chan(t, tm_prevchan);
-            gconfig_set_toggle_func(t, tm_prevfunc);
-            tm_editing = false;
-            tm_field = 0;
-            drawToggleHeader(false, 0);
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, false, 0);
-          }
+          if (ok) commit();
+          if (cx) cancel();
         }
         break;
       }
@@ -2077,10 +2145,10 @@ void configLoop() {
 }
 
 // ---- Toggle helpers ----
-bool toggleOn(int bit) {
+bool toggleOn(int toggle) {  // toggle index 0..9, read through its assigned MCP pin
   SwitchState sw;
   if (!switches_get(sw)) return false;  // sensor missing -> treat as OFF
-  return sw.bits & (1u << bit);
+  return gconfig_toggle_on(toggle, sw.bits);
 }
 
 // ---- MCP23017 debug mode (Toggle3 + Toggle4 + Toggle5 all ON at power-up) ----
@@ -2090,17 +2158,7 @@ bool toggleOn(int bit) {
 // toggle wired to that pin. Changes are logged to serial. CRSF output is silenced. The
 // toggles under test can't double as an exit, so the BOOT button (GPIO0) reboots out of
 // it — flip one of the three toggles OFF first or the combo re-enters on the way up.
-constexpr int TOGGLE3_BIT = 12;  // B4
-constexpr int TOGGLE4_BIT = 8;   // B0
-constexpr uint16_t MCP_DEBUG_COMBO =
-    (1u << TOGGLE3_BIT) | (1u << TOGGLE4_BIT) | (1u << TOGGLE5_BIT);
-// Toggle number wired to each MCP bit (0 = spare pin). Inverse of TOGGLE_BIT[] in crsf.cpp.
-constexpr uint8_t BIT_TOGGLE[16] = {7, 0, 0, 0, 0, 0, 0, 10, 4, 5, 6, 1, 3, 2, 9, 8};
-
-bool mcpDebugRequested() {
-  SwitchState sw;
-  return switches_get(sw) && (sw.bits & MCP_DEBUG_COMBO) == MCP_DEBUG_COMBO;
-}
+bool mcpDebugRequested() { return toggleOn(TOGGLE3) && toggleOn(TOGGLE4) && toggleOn(TOGGLE5); }
 
 void mcpDebugLoop() {
   // Landscape: port A on the top row, port B below, pins 0-7 left to right.
@@ -2123,6 +2181,13 @@ void mcpDebugLoop() {
     tft.drawString("= exit", 2, LCD_H - 9, 1);
   } else {
     tft.drawString("BOOT=exit", 110, 5, 1);
+  }
+
+  // Toggle number assigned to each MCP bit (0 = none), from the current pin map.
+  uint8_t bit_toggle[16] = {0};
+  for (int t = 9; t >= 0; --t) {
+    uint8_t pin = gconfig_toggle_pin(t);
+    if (pin <= 15) bit_toggle[pin] = (uint8_t)(t + 1);
   }
 
   uint16_t last = 0, seen = 0;
@@ -2166,8 +2231,8 @@ void mcpDebugLoop() {
       tft.setTextDatum(MC_DATUM);
       tft.setTextColor(on ? TFT_BLACK : TFT_LIGHTGREY, bg);
       tft.drawString(n, x + (CW - 2) / 2, y + 9, 2);
-      if (BIT_TOGGLE[i]) {  // the toggle wired here
-        snprintf(n, sizeof(n), "T%d", BIT_TOGGLE[i]);
+      if (bit_toggle[i]) {  // the toggle assigned here
+        snprintf(n, sizeof(n), "T%d", bit_toggle[i]);
         tft.setTextColor(on ? TFT_BLACK : TFT_DARKGREY, bg);
         tft.drawString(n, x + (CW - 2) / 2, y + CH - 8, 1);
       }
@@ -2243,7 +2308,7 @@ void appTask(void*) {
       // Pocket: the reboot reset menu mode to off, so the next BOOT press is the exit.
       bool leave = MENU_ON_BOOT_BTN
                        ? menuModeOn()
-                       : (switches_get(sw) && !(sw.bits & (1u << TOGGLE6_BIT)));
+                       : (switches_get(sw) && !gconfig_toggle_on(TOGGLE6, sw.bits));
       if (leave) {
         safeSetWifiBoot(false);  // clear flag, reboot to normal
         doReboot();              // does not return
@@ -2259,7 +2324,7 @@ void appTask(void*) {
   // Toggle5 ON at power-up forces a fresh calibration; otherwise use the stored one.
   // First boot (nothing stored) always calibrates.
   bool have_cal = storage_load_cal(g_cal);
-  if (toggleOn(TOGGLE5_BIT) || !have_cal) {
+  if (toggleOn(TOGGLE5) || !have_cal) {
     calibrationWizard();
   } else {
     Serial.println("[cal] loaded from NVS");

@@ -87,21 +87,6 @@ void packChannels(const uint16_t ch[16], uint8_t out[22]) {
   }
 }
 
-// Toggle -> MCP23017 bit map (A0-A7 = bits 0-7, B0-B7 = bits 8-15).
-// Index i = Toggle(i+1) and drives channel CH(5+i). 2-position for now.
-constexpr uint8_t TOGGLE_BIT[10] = {
-    11,  // CH5  = Toggle1  = B3
-    13,  // CH6  = Toggle2  = B5
-    12,  // CH7  = Toggle3  = B4
-    8,   // CH8  = Toggle4  = B0
-    9,   // CH9  = Toggle5  = B1
-    10,  // CH10 = Toggle6  = B2
-    0,   // CH11 = Toggle7  = A0
-    15,  // CH12 = Toggle8  = B7
-    14,  // CH13 = Toggle9  = B6
-    7,   // CH14 = Toggle10 = A7
-};
-
 void buildChannels(uint16_t ch[16]) {
   GimbalState g;
   gimbals_get(g);
@@ -116,12 +101,13 @@ void buildChannels(uint16_t ch[16]) {
   ch[3] = gconfig_map_crsf(1, g.yaw);
 
   // CH5..CH16 default to center, then each toggle drives its assigned channel
-  // (configurable in the Toggle Mapping menu; Toggle6 is reserved for menu mode).
+  // (pin + channel are both configurable in the Toggle Mapping menu; in the standard
+  // build Toggle6 is reserved for menu mode and has no channel).
   for (int c = 4; c < 16; ++c) ch[c] = CRSF_MID;
   for (int i = 0; i < 10; ++i) {
     uint8_t chan = gconfig_toggle_chan(i);  // 5..16, 0 = unassigned (incl. Toggle6)
     if (chan < 5 || chan > 16) continue;
-    ch[chan - 1] = (sw.bits & (1u << TOGGLE_BIT[i])) ? CRSF_MAX : CRSF_MIN;
+    ch[chan - 1] = gconfig_toggle_on(i, sw.bits) ? CRSF_MAX : CRSF_MIN;
   }
 
   // Arm state for the UI banner + flight timer only. The throttle is NOT gated: the real
@@ -129,7 +115,7 @@ void buildChannels(uint16_t ch[16]) {
   // via the ARM channel (the ARM toggle's mapped channel) — the FC won't spin motors while
   // disarmed regardless of throttle. If no toggle has the ARM function, state = unconfigured.
   int armT = gconfig_toggle_with_func(GFUNC_ARM);
-  bool armed = (armT < 0) ? true : (sw.bits & (1u << TOGGLE_BIT[armT])) != 0;
+  bool armed = (armT < 0) ? true : gconfig_toggle_on(armT, sw.bits);
 
   portENTER_CRITICAL(&g_mux);
   g_arm_state = (armT < 0) ? -1 : (armed ? 1 : 0);
@@ -438,7 +424,7 @@ uint16_t crsf_toggle_mask() {
   switches_get(sw);
   uint16_t m = 0;
   for (int i = 0; i < 10; ++i)
-    if (sw.bits & (1u << TOGGLE_BIT[i])) m |= (uint16_t)(1u << i);
+    if (gconfig_toggle_on(i, sw.bits)) m |= (uint16_t)(1u << i);
   return m;
 }
 
