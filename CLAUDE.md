@@ -270,9 +270,12 @@ goes through `gconfig_toggle_on()` / `gconfig_toggle_pin()` — never hard-code 
 
 MCP bit numbering: A0–A7 = bits 0–7, B0–B7 = bits 8–15.
 
-**TOGGLE MAP menu** — each toggle row edits PIN → CH → FUNC, saved on the last OK (CXL
-reverts all). PIN: UP/DOWN steps A0..B7/`--`, or just flip the physical switch and its pin
-is captured. Standard build: Toggle6 (menu switch) has only a pin, and a new pin is rejected
+**TOGGLE MAP menu** — each toggle row edits PIN → INV → CH → FUNC, saved on the last OK
+(CXL reverts all). PIN: UP/DOWN steps A0..B7/`--`, or just flip the physical switch and its
+pin is captured. INV: per-toggle invert (`g_tinv[]`, NVS key `tinv`) — the toggle reads ON
+while its pin is open; applied inside `gconfig_toggle_on()` so every reader sees it
+(landscape shows NOR/INV, portrait writes an inverted pin as `!B3`). Standard build:
+Toggle6 (menu switch) has only pin + invert, and a new setting is rejected
 unless it reads ON at save time (prevents locking yourself out of the menu). Pocket build:
 Toggle6 is an ordinary toggle (BOOT button does the menu).
 

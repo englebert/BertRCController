@@ -15,6 +15,7 @@ constexpr const char* KEY_FLIP = "gflip";
 constexpr const char* KEY_TMAP = "tmap";
 constexpr const char* KEY_TFUNC = "tfunc";
 constexpr const char* KEY_TPIN = "tpin";
+constexpr const char* KEY_TINV = "tinv";
 constexpr const char* KEY_WIFI_BOOT = "wifiboot";
 constexpr const char* KEY_TOTAL_FLIGHT = "tflight";
 constexpr const char* KEY_TELEM_SEL = "telemsel";
@@ -90,6 +91,17 @@ bool storage_load_toggle_pins(uint8_t out[10]) {
 bool storage_save_toggle_pins(const uint8_t in[10]) {
   if (!g_open) return false;
   return prefs.putBytes(KEY_TPIN, in, 10) == 10;
+}
+
+bool storage_load_toggle_inv(uint8_t out[10]) {
+  if (!g_open) return false;
+  if (!prefs.isKey(KEY_TINV)) return false;  // never saved yet: defaults, no NVS error log
+  return prefs.getBytes(KEY_TINV, out, 10) == 10;
+}
+
+bool storage_save_toggle_inv(const uint8_t in[10]) {
+  if (!g_open) return false;
+  return prefs.putBytes(KEY_TINV, in, 10) == 10;
 }
 
 bool storage_load_toggle_funcs(uint8_t out[10]) {

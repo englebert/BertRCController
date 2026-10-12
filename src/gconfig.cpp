@@ -24,6 +24,7 @@ uint8_t g_tpin[10] = {
     14,  // Toggle9  = B6
     7,   // Toggle10 = A7
 };
+bool g_tinv[10] = {false};  // toggle invert: ON when the pin is open
 GimbalCal g_cal = {};       // gimbal calibration endpoints (raw ADC -> CRSF)
 
 constexpr int TOGGLE6 = 5;  // menu-mode switch in the standard build (see header)
@@ -72,6 +73,15 @@ void gconfig_init() {
     Serial.println("[gconfig] toggle pins loaded");
   } else {
     Serial.println("[gconfig] toggle pins: default");
+  }
+
+  // Toggle invert flags (default none).
+  uint8_t ti[10];
+  if (storage_load_toggle_inv(ti)) {
+    portENTER_CRITICAL(&g_mux);
+    for (int i = 0; i < 10; ++i) g_tinv[i] = ti[i] != 0;
+    portEXIT_CRITICAL(&g_mux);
+    Serial.println("[gconfig] toggle invert loaded");
   }
 
   // Toggle -> function labels (default none).
@@ -165,9 +175,29 @@ void gconfig_set_toggle_pin(int toggle, uint8_t pin) {
   portEXIT_CRITICAL(&g_mux);
 }
 
+bool gconfig_toggle_inv(int toggle) {
+  if (toggle < 0 || toggle > 9) return false;
+  portENTER_CRITICAL(&g_mux);
+  bool v = g_tinv[toggle];
+  portEXIT_CRITICAL(&g_mux);
+  return v;
+}
+
+void gconfig_set_toggle_inv(int toggle, bool inv) {
+  if (toggle < 0 || toggle > 9) return;
+  portENTER_CRITICAL(&g_mux);
+  g_tinv[toggle] = inv;
+  portEXIT_CRITICAL(&g_mux);
+}
+
 bool gconfig_toggle_on(int toggle, uint16_t bits) {
-  uint8_t pin = gconfig_toggle_pin(toggle);
-  return pin <= 15 && (bits & (1u << pin));
+  if (toggle < 0 || toggle > 9) return false;
+  portENTER_CRITICAL(&g_mux);
+  uint8_t pin = g_tpin[toggle];
+  bool inv = g_tinv[toggle];
+  portEXIT_CRITICAL(&g_mux);
+  if (pin > 15) return false;  // unassigned: OFF regardless of invert
+  return ((bits >> pin) & 1u) != (inv ? 1u : 0u);
 }
 
 uint8_t gconfig_toggle_chan(int toggle) {
@@ -215,18 +245,20 @@ int gconfig_toggle_with_func(uint8_t f) {
 
 bool gconfig_save() {
   bool f[4];
-  uint8_t t[10], fn[10], tp[10];
+  uint8_t t[10], fn[10], tp[10], ti[10];
   portENTER_CRITICAL(&g_mux);
   for (int i = 0; i < 4; ++i) f[i] = g_flip[i];
   for (int i = 0; i < 10; ++i) {
     t[i] = g_tchan[i];
     fn[i] = g_tfunc[i];
     tp[i] = g_tpin[i];
+    ti[i] = g_tinv[i] ? 1 : 0;
   }
   portEXIT_CRITICAL(&g_mux);
   bool ok1 = storage_save_flip(f);
   bool ok2 = storage_save_toggles(t);
   bool ok3 = storage_save_toggle_funcs(fn);
   bool ok4 = storage_save_toggle_pins(tp);
-  return ok1 && ok2 && ok3 && ok4;
+  bool ok5 = storage_save_toggle_inv(ti);
+  return ok1 && ok2 && ok3 && ok4 && ok5;
 }

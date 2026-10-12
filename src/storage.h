@@ -38,6 +38,10 @@ bool storage_save_toggles(const uint8_t in[10]);
 bool storage_load_toggle_pins(uint8_t out[10]);
 bool storage_save_toggle_pins(const uint8_t in[10]);
 
+// Toggle invert flags (1 = inverted: the toggle reads ON when its pin is open).
+bool storage_load_toggle_inv(uint8_t out[10]);
+bool storage_save_toggle_inv(const uint8_t in[10]);
+
 // Toggle -> function label map (index into the UI's function name list; 0 = none).
 bool storage_load_toggle_funcs(uint8_t out[10]);
 bool storage_save_toggle_funcs(const uint8_t in[10]);

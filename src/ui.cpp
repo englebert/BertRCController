@@ -1306,8 +1306,9 @@ void drawBatteryDynamic(bool force) {
   }
 }
 
-// --- Menu item 2: Toggle -> MCP23017 pin + CRSF channel + function. All 10 toggles are
-// listed; in the standard build Toggle6 (menu-mode switch) only has a pin to assign.
+// --- Menu item 2: Toggle -> MCP23017 pin + invert + CRSF channel + function. All 10
+// toggles are listed; in the standard build Toggle6 (menu-mode switch) only has a pin
+// and invert to assign.
 const int EDIT_TOGGLE[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};  // toggle index per list row
 constexpr int EDIT_TOGGLE_N = 10;
 
@@ -1334,18 +1335,22 @@ void drawToggleHeader(bool editing, int field) {
   drawHeaderTitle("TOGGLE MAP");  // clears the header strip only
   const char* hint = !editing       ? lp("OK:edit  CXL:back", "OK:edit")
                      : (field == 0) ? lp("PIN: flip switch or UP/DN", "flip sw/UPDN")
-                     : (field == 1) ? lp("edit CH   OK:next", "CH   OK:next")
+                     : (field == 1) ? lp("INVERT: UP/DN  OK:next", "INV  OK:next")
+                     : (field == 2) ? lp("edit CH   OK:next", "CH   OK:next")
                                     : lp("edit FUNC OK:save", "FUNC OK:save");
   drawHeaderHint(hint, TFT_DARKGREY);
 }
 
 // Draw one visible row. slot = visual position 0..TM_VISIBLE-1; eidx = index into
 // EDIT_TOGGLE (or out of range for a blank slot on the last short page).
-// field: 0 = pin, 1 = channel, 2 = function (highlighted green when sel && editing).
-// pin_edit >= 0: the not-yet-committed pin being edited on the selected row.
+// field: 0 = pin, 1 = invert, 2 = channel, 3 = function (highlighted green when sel &&
+// editing). pin_edit / inv_edit >= 0: the not-yet-committed pin / invert flag being edited
+// on the selected row. Landscape shows invert as its own NOR/INV column; portrait has no
+// room, so an inverted pin is written "!B3".
 // Rendered into an off-screen sprite and blitted once, so a moving cursor never
 // flashes the row as a solid bar between clear and text.
-void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field, int pin_edit = -1) {
+void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field, int pin_edit = -1,
+                   int inv_edit = -1) {
   int y = TM_ROW_Y0 + slot * TM_ROW_H;
   uint16_t bg = sel ? TFT_NAVY : COL_BG;
   TFT_eSprite spr(&tft);
@@ -1357,10 +1362,13 @@ void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field, int pi
     int t = EDIT_TOGGLE[eidx];
     uint8_t c = gconfig_toggle_chan(t);
     uint8_t fn = gconfig_toggle_func(t);
-    char ts[6], ps[4], cs[6], fs[10];
+    char ts[6], ps[6], cs[6], fs[10];
     snprintf(ts, sizeof(ts), "T%d", t + 1);
-    pinName((sel && editing && pin_edit >= 0) ? (uint8_t)pin_edit : gconfig_toggle_pin(t), ps,
-            sizeof(ps));
+    bool inv = (sel && editing && inv_edit >= 0) ? (inv_edit != 0) : gconfig_toggle_inv(t);
+    ps[0] = '!';  // portrait prefix for an inverted pin; skipped otherwise
+    char* pn = ps + 1;
+    pinName((sel && editing && pin_edit >= 0) ? (uint8_t)pin_edit : gconfig_toggle_pin(t), pn,
+            sizeof(ps) - 1);
     if (c) snprintf(cs, sizeof(cs), "CH%u", c);
     else snprintf(cs, sizeof(cs), "--");
     if (gconfig_toggle_reserved(t)) snprintf(fs, sizeof(fs), "MENU");  // the mode switch
@@ -1368,15 +1376,16 @@ void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field, int pi
 
     uint16_t base = sel ? TFT_YELLOW : TFT_WHITE;
     uint16_t pinCol = (sel && editing && field == 0) ? TFT_GREEN : base;
-    uint16_t chCol = (sel && editing && field == 1) ? TFT_GREEN : base;
-    uint16_t fnCol = (sel && editing && field == 2) ? TFT_GREEN : base;
+    uint16_t invCol = (sel && editing && field == 1) ? TFT_GREEN : base;
+    uint16_t chCol = (sel && editing && field == 2) ? TFT_GREEN : base;
+    uint16_t fnCol = (sel && editing && field == 3) ? TFT_GREEN : base;
     spr.setTextDatum(ML_DATUM);
     spr.setTextPadding(0);
     spr.setTextColor(base, bg);
-    if (PORTRAIT) {  // line 1: toggle ... channel; line 2: pin ... function
+    if (PORTRAIT) {  // line 1: toggle ... channel; line 2: [!]pin ... function
       spr.drawString(ts, 2, 8, 2);
-      spr.setTextColor(pinCol, bg);
-      spr.drawString(ps, 2, 24, 2);
+      spr.setTextColor((invCol == TFT_GREEN) ? invCol : pinCol, bg);
+      spr.drawString(inv ? ps : pn, 2, 24, 2);
       spr.setTextDatum(MR_DATUM);
       spr.setTextColor(chCol, bg);
       spr.drawString(cs, LCD_W - 2, 8, 2);
@@ -1386,11 +1395,13 @@ void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field, int pi
       int cy = TM_ROW_H / 2;  // vertical center inside the sprite
       spr.drawString(ts, 8, cy, 2);
       spr.setTextColor(pinCol, bg);
-      spr.drawString(ps, 48, cy, 2);
+      spr.drawString(pn, 44, cy, 2);
+      spr.setTextColor(inv && invCol == base ? TFT_RED : invCol, bg);
+      spr.drawString(inv ? "INV" : "NOR", 76, cy, 2);
       spr.setTextColor(chCol, bg);
-      spr.drawString(cs, 96, cy, 2);
+      spr.drawString(cs, 118, cy, 2);
       spr.setTextColor(fnCol, bg);
-      spr.drawString(fs, 160, cy, 2);
+      spr.drawString(fs, 174, cy, 2);
     }
   }
   spr.pushSprite(0, y - TM_ROW_H / 2);
@@ -1582,8 +1593,9 @@ void configLoop() {
   int tmcursor = 0;  // selected toggle on the Toggle Mapping page
   int tm_scroll = 0;  // index (into EDIT_TOGGLE) of the top visible row
   bool tm_editing = false;
-  int tm_field = 0;         // 0 = pin, 1 = channel, 2 = function (which field OK cycles)
+  int tm_field = 0;  // 0 = pin, 1 = invert, 2 = channel, 3 = function (OK steps through)
   uint8_t tm_pin = GPIN_NONE;  // pin being edited; written to gconfig only on save
+  bool tm_inv = false;         // invert flag being edited; likewise applied on save
   uint16_t tm_lastbits = 0;    // MCP inputs last tick (pin field: detect a flipped switch)
   uint8_t tm_prevchan = 0;  // channel before entering edit (for CANCEL revert)
   uint8_t tm_prevfunc = 0;  // function before entering edit (for CANCEL revert)
@@ -1704,13 +1716,14 @@ void configLoop() {
             tm_editing = true;
             tm_field = 0;  // start on the pin field
             tm_pin = gconfig_toggle_pin(t);
+            tm_inv = gconfig_toggle_inv(t);
             tm_prevchan = gconfig_toggle_chan(t);
             tm_prevfunc = gconfig_toggle_func(t);
             SwitchState sw;
             switches_get(sw);
             tm_lastbits = sw.bits;
             drawToggleHeader(true, tm_field);
-            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field, tm_pin);
+            drawToggleRow(tmcursor - tm_scroll, tmcursor, true, true, tm_field, tm_pin, tm_inv);
           }
           if (cx) {
             page = Page::List;
@@ -1719,10 +1732,10 @@ void configLoop() {
           break;
         }
 
-        // ---- Editing the selected toggle: PIN -> CH -> FUNC, saved on the last OK ----
+        // ---- Editing the selected toggle: PIN -> INV -> CH -> FUNC, saved on the last OK ----
         auto drawRow = [&]() {
           drawToggleRow(tmcursor - tm_scroll, tmcursor, true, tm_editing, tm_field,
-                        tm_editing ? tm_pin : -1);
+                        tm_editing ? tm_pin : -1, tm_editing ? (int)tm_inv : -1);
         };
         auto endEdit = [&]() {
           tm_editing = false;
@@ -1730,26 +1743,28 @@ void configLoop() {
           drawToggleHeader(false, 0);
           drawRow();
         };
-        auto cancel = [&]() {  // revert every field (the pin was never applied)
+        auto cancel = [&]() {  // revert every field (pin + invert were never applied)
           gconfig_set_toggle_chan(t, tm_prevchan);
           gconfig_set_toggle_func(t, tm_prevfunc);
           endEdit();
         };
         auto commit = [&]() {
-          // The standard build's menu switch must stay reachable: only accept a pin that
-          // reads ON right now (we are in menu mode, so its real switch is ON). Anything
-          // else would drop out of the menu with no way back in.
+          // The standard build's menu switch must stay reachable: only accept a pin +
+          // invert that reads ON right now (we are in menu mode, so its real switch is
+          // ON). Anything else would drop out of the menu with no way back in.
           if (!MENU_ON_BOOT_BTN && t == TOGGLE6) {
             SwitchState sw;
-            bool on = tm_pin <= 15 && switches_get(sw) && (sw.bits & (1u << tm_pin));
+            bool on = tm_pin <= 15 && switches_get(sw) &&
+                      (((sw.bits >> tm_pin) & 1u) != (tm_inv ? 1u : 0u));
             if (!on) {
               cancel();
               drawHeaderTitle("TOGGLE MAP");
-              drawHeaderHint(lp("REJECTED: T6 pin must read ON", "T6 not ON!"), TFT_RED);
+              drawHeaderHint(lp("REJECTED: T6 must read ON", "T6 not ON!"), TFT_RED);
               return;
             }
           }
           gconfig_set_toggle_pin(t, tm_pin);
+          gconfig_set_toggle_inv(t, tm_inv);
           safeSaveGconfig();
           endEdit();
         };
@@ -1768,16 +1783,28 @@ void configLoop() {
           }
           if (tm_pin != before) drawRow();
           if (ok) {
-            if (gconfig_toggle_reserved(t)) {  // menu switch: the pin is all there is
+            tm_field = 1;
+            drawToggleHeader(true, tm_field);
+            drawRow();
+          }
+          if (cx) cancel();
+        } else if (tm_field == 1) {
+          // Edit INVERT: up/down flip normal <-> inverted. OK = next field.
+          if (up || dn) {
+            tm_inv = !tm_inv;
+            drawRow();
+          }
+          if (ok) {
+            if (gconfig_toggle_reserved(t)) {  // menu switch: pin + invert are all there is
               commit();
             } else {
-              tm_field = 1;
+              tm_field = 2;
               drawToggleHeader(true, tm_field);
               drawRow();
             }
           }
           if (cx) cancel();
-        } else if (tm_field == 1) {
+        } else if (tm_field == 2) {
           // Edit CHANNEL: up/down cycle channel; OK advances to function; CXL reverts.
           uint8_t c = gconfig_toggle_chan(t);
           if (up) {  // none -> 5..16 -> none
@@ -1789,13 +1816,13 @@ void configLoop() {
             drawRow();
           }
           if (ok) {  // advance to the function field
-            tm_field = 2;
+            tm_field = 3;
             drawToggleHeader(true, tm_field);
             drawRow();
           }
           if (cx) cancel();
         } else {
-          // Edit FUNCTION: up/down cycle label; OK saves all three fields; CXL reverts.
+          // Edit FUNCTION: up/down cycle label; OK saves all four fields; CXL reverts.
           uint8_t f = gconfig_toggle_func(t);
           if (up) {
             gconfig_set_toggle_func(t, (uint8_t)((f + 1) % FUNC_COUNT));
