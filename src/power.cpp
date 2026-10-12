@@ -9,7 +9,7 @@
 
 namespace {
 
-constexpr uint8_t INA226_ADDR = 0x40;
+constexpr uint8_t INA226_ADDR = 0x44;
 
 // Shunt design (see CLAUDE.md): 0.025 ohm — two 0.05 ohm resistors in PARALLEL to double
 // the current range. The theoretical FS is 3.2768 A (81.92 mV), but the library caps
@@ -63,7 +63,7 @@ bool power_start() {
   Wire.setClock(400000);
 
   if (!ina.begin()) {
-    Serial.println("[power] INA226 not found at 0x40");
+    Serial.println("[power] INA226 not found at 0x44");
     // Still start the task so the UI shows a clear "no sensor" state if it appears later.
   } else {
     // normalize=false keeps a clean ~100 uA current LSB (81.85 mV @ 3.274 A).
