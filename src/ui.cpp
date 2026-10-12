@@ -28,6 +28,25 @@ TFT_eSPI tft;  // pins come from build_flags (platformio.ini)
 // backgrounds use this so the theme can be changed in one place.
 constexpr uint16_t COL_BG = TFT_BLACK;
 
+// ---- Orientation ----
+// The standard build is landscape (284x76); POCKETVERSION mounts the same panel portrait
+// (76x284, see display_cfg.h). Screens branch on PORTRAIT for their geometry. The
+// landscape numbers are the original hardware-tuned layout — keep them as they are.
+constexpr bool PORTRAIT = !PANEL_LANDSCAPE;
+
+// Orientation pick for a label/hint: the landscape string vs. a short portrait one
+// (76 px fits 12 chars of font 1, roughly 9 of font 2).
+constexpr const char* lp(const char* land, const char* port) { return PORTRAIT ? port : land; }
+
+// Largest of fonts 4/2/1 (not above maxFont) whose text fits `avail` px. Landscape always
+// keeps maxFont — its layout was sized for it.
+int fitFont(const char* s, int maxFont, int avail) {
+  if (!PORTRAIT) return maxFont;
+  if (maxFont >= 4 && tft.textWidth(s, 4) <= avail) return 4;
+  if (maxFont >= 2 && tft.textWidth(s, 2) <= avail) return 2;
+  return 1;
+}
+
 // Battery % mapping (2S): 6.0 V = 0%, 8.4 V = 100%.
 constexpr float VBAT_MIN = 6.0f;
 constexpr float VBAT_MAX = 8.4f;
@@ -39,6 +58,36 @@ constexpr float THROTTLE_GATE_PCT = 15.0f;
 constexpr int TOGGLE6_BIT = 10;
 // Toggle5 (B1 = MCP bit 9) ON at power-up = force the gimbal calibration wizard.
 constexpr int TOGGLE5_BIT = 9;
+
+// ---- Menu-mode source ----
+// Standard build: Toggle6's level (ON = configuration mode). POCKETVERSION: each press
+// of the BOOT button (GPIO0, active-low) flips between the RC screen and configuration
+// mode; it always powers up on the RC screen. The press is latched in a GPIO interrupt
+// because the RC loop only wakes every 200 ms and would miss a short tap.
+bool toggleOn(int bit);  // fwd decl (defined below)
+#ifdef POCKETVERSION
+constexpr bool MENU_ON_BOOT_BTN = true;
+constexpr TickType_t MENU_BTN_DEBOUNCE = pdMS_TO_TICKS(250);
+volatile bool g_menuMode = false;
+volatile TickType_t g_menuBtnTick = 0;
+
+void IRAM_ATTR menuBtnIsr() {
+  TickType_t now = xTaskGetTickCountFromISR();
+  if ((TickType_t)(now - g_menuBtnTick) < MENU_BTN_DEBOUNCE) return;  // contact bounce
+  g_menuBtnTick = now;
+  g_menuMode = !g_menuMode;
+}
+
+void menuModeInit() {
+  pinMode(PIN_BOOT_BTN, INPUT_PULLUP);
+  attachInterrupt(PIN_BOOT_BTN, menuBtnIsr, FALLING);
+}
+bool menuModeOn() { return g_menuMode; }
+#else
+constexpr bool MENU_ON_BOOT_BTN = false;
+void menuModeInit() {}
+bool menuModeOn() { return toggleOn(TOGGLE6_BIT); }
+#endif
 
 // Menu-key thresholds (TASK01.md), on the RC microsecond scale 1000..2000 (center
 // 1500) derived from calibrated stick percent. Pitch: >1800 = UP, <1200 = DOWN.
@@ -165,12 +214,19 @@ void bootScreen() {
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawString("BOOTING UP", LCD_W / 2, LCD_H / 2, 4);
+  if (PORTRAIT) {
+    tft.drawString("BOOTING", LCD_W / 2, LCD_H / 2 - 10, 2);
+    tft.drawString("UP", LCD_W / 2, LCD_H / 2 + 10, 2);
+  } else {
+    tft.drawString("BOOTING UP", LCD_W / 2, LCD_H / 2, 4);
+  }
 }
 
 // ---- Module init sequence ----
 const char* const MOD_NAME[4] = {"INA226", "MCP23017", "Gimbals", "CRSF"};
-int rowY(int i) { return 9 + i * 17; }  // 4 rows in 76 px
+// Landscape: 4 rows in 76 px, status on the name's line. Portrait: status under the name.
+int rowY(int i) { return PORTRAIT ? 40 + i * 56 : 9 + i * 17; }
+int statY(int i) { return rowY(i) + (PORTRAIT ? 18 : 0); }
 
 void drawInitList() {
   tft.fillScreen(COL_BG);
@@ -182,7 +238,7 @@ void drawInitList() {
     tft.setTextDatum(MR_DATUM);
     tft.setTextPadding(tft.textWidth("FAIL", 2));
     tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-    tft.drawString("...", LCD_W - 4, rowY(i), 2);
+    tft.drawString("...", LCD_W - 4, statY(i), 2);
   }
 }
 
@@ -190,7 +246,7 @@ void setStatus(int i, bool ok) {
   tft.setTextDatum(MR_DATUM);
   tft.setTextPadding(tft.textWidth("FAIL", 2));
   tft.setTextColor(ok ? TFT_GREEN : TFT_RED, TFT_BLACK);
-  tft.drawString(ok ? "OK" : "FAIL", LCD_W - 4, rowY(i), 2);
+  tft.drawString(ok ? "OK" : "FAIL", LCD_W - 4, statY(i), 2);
 }
 
 void runInit(bool start_crsf) {
@@ -210,7 +266,7 @@ void runInit(bool start_crsf) {
     tft.setTextDatum(MR_DATUM);
     tft.setTextPadding(tft.textWidth("FAIL", 2));
     tft.setTextColor(TFT_CYAN, COL_BG);
-    tft.drawString("OFF", LCD_W - 4, rowY(3), 2);
+    tft.drawString("OFF", LCD_W - 4, statY(3), 2);
   }
   vTaskDelay(pdMS_TO_TICKS(700));
 }
@@ -234,7 +290,13 @@ void calibrationWizard() {
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawString("CALIBRATE: sweep each stick min<->max x3", LCD_W / 2, 8, 1);
+  if (PORTRAIT) {
+    tft.drawString("CALIBRATE", LCD_W / 2, 6, 1);
+    tft.drawString("sweep sticks", LCD_W / 2, 18, 1);
+    tft.drawString("min<->max x3", LCD_W / 2, 30, 1);
+  } else {
+    tft.drawString("CALIBRATE: sweep each stick min<->max x3", LCD_W / 2, 8, 1);
+  }
 
   uint16_t mn[4] = {4095, 4095, 4095, 4095};
   uint16_t mx[4] = {0, 0, 0, 0};
@@ -242,12 +304,15 @@ void calibrationWizard() {
   uint8_t dn[4] = {0, 0, 0, 0};    // high->low sweeps (confirm MIN)
   Zone zone[4] = {UNK, UNK, UNK, UNK};
 
-  const int cw = 66, gap = 4;
-  const int x0 = (LCD_W - 4 * cw - 3 * gap) / 2;
-  const int cy = 20, chh = 44;
+  // Landscape: 4 cells in a row. Portrait: the same cells stacked.
+  const int cw = 66, gap = 4, chh = 44;
+  const int x0 = PORTRAIT ? (LCD_W - cw) / 2 : (LCD_W - 4 * cw - 3 * gap) / 2;
+  const int y0 = PORTRAIT ? 40 : 20;
+  auto cellX = [&](int i) { return PORTRAIT ? x0 : x0 + i * (cw + gap); };
+  auto cellY = [&](int i) { return PORTRAIT ? y0 + i * (chh + gap) : y0; };
   bool done_cell[4] = {false, false, false, false};
   for (int i = 0; i < 4; ++i) {
-    int x = x0 + i * (cw + gap);
+    int x = cellX(i), cy = cellY(i);
     tft.drawRoundRect(x, cy, cw, chh, 4, TFT_RED);
     tft.setTextColor(TFT_WHITE, TFT_BLACK);
     tft.drawString(NAME[i], x + cw / 2, cy + 7, 1);
@@ -282,7 +347,7 @@ void calibrationWizard() {
       for (int i = 0; i < 4; ++i) {
         bool cell_done = (up[i] >= NEED) && (dn[i] >= NEED);
         if (!cell_done) all = false;
-        int x = x0 + i * (cw + gap);
+        int x = cellX(i), cy = cellY(i);
         tft.setTextDatum(MC_DATUM);
         tft.setTextPadding(cw - 8);
         snprintf(b, sizeof(b), "MX %d/%d", up[i], NEED);
@@ -307,10 +372,19 @@ void calibrationWizard() {
     tft.setTextDatum(MC_DATUM);
     tft.setTextPadding(0);
     tft.setTextColor(TFT_YELLOW, COL_BG);
-    tft.drawString("CENTER THE STICKS", LCD_W / 2, 12, 2);
-    tft.setTextColor(TFT_WHITE, COL_BG);
-    tft.drawString("leave at rest...", LCD_W / 2, 28, 1);
-    const int bx = 8, bw = LCD_W - 16, by = 58, bh = 12;
+    if (PORTRAIT) {  // wrapped, mid-screen
+      tft.drawString("CENTER", LCD_W / 2, 90, 2);
+      tft.drawString("STICKS", LCD_W / 2, 108, 2);
+      tft.setTextColor(TFT_WHITE, COL_BG);
+      tft.drawString("leave them", LCD_W / 2, 128, 1);
+      tft.drawString("at rest...", LCD_W / 2, 140, 1);
+    } else {
+      tft.drawString("CENTER THE STICKS", LCD_W / 2, 12, 2);
+      tft.setTextColor(TFT_WHITE, COL_BG);
+      tft.drawString("leave at rest...", LCD_W / 2, 28, 1);
+    }
+    const int bx = 8, bw = LCD_W - 16, by = PORTRAIT ? 200 : 58, bh = 12;
+    const int cnty = PORTRAIT ? 172 : 44;  // countdown seconds, above the bar
     tft.drawRect(bx, by, bw, bh, TFT_DARKGREY);
     const int HOLD_MS = 5000;
     int last_sec = -1;
@@ -332,7 +406,7 @@ void calibrationWizard() {
         tft.setTextDatum(MC_DATUM);
         tft.setTextPadding(tft.textWidth("00s", 4));
         tft.setTextColor(TFT_GREEN, COL_BG);
-        tft.drawString(b, LCD_W / 2, 44, 4);
+        tft.drawString(b, LCD_W / 2, cnty, 4);
       }
       vTaskDelay(pdMS_TO_TICKS(TICK_MS));
     }
@@ -353,20 +427,29 @@ void calibrationWizard() {
   tft.fillScreen(COL_BG);
   tft.setTextDatum(MC_DATUM);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString("SAVED", LCD_W / 2, LCD_H / 2, 4);
+  tft.drawString("SAVED", LCD_W / 2, LCD_H / 2, fitFont("SAVED", 4, LCD_W - 4));
   vTaskDelay(pdMS_TO_TICKS(1200));
 }
 
 // ---- Throttle-safety gate ----
 void drawThrottleWarning() {
   tft.fillScreen(COL_BG);
-  // Warning triangle, left side.
-  const int cx = 34, cy = LCD_H / 2;
+  // Warning triangle: left side (landscape) / top (portrait).
+  const int cx = PORTRAIT ? LCD_W / 2 : 34, cy = PORTRAIT ? 60 : LCD_H / 2;
   tft.fillTriangle(cx, cy - 24, cx - 26, cy + 22, cx + 26, cy + 22, TFT_RED);
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_WHITE, TFT_RED);
   tft.drawString("!", cx, cy + 4, 4);
+  if (PORTRAIT) {  // text wrapped under the triangle
+    tft.setTextColor(TFT_RED, TFT_BLACK);
+    tft.drawString("THROTTLE", LCD_W / 2, 112, 2);
+    tft.drawString("HIGH", LCD_W / 2, 130, 2);
+    tft.setTextColor(TFT_WHITE, TFT_BLACK);
+    tft.drawString("Lower to", LCD_W / 2, 162, 2);
+    tft.drawString("continue", LCD_W / 2, 180, 2);
+    return;
+  }
   tft.setTextColor(TFT_RED, TFT_BLACK);
   tft.drawString("THROTTLE HIGH", (LCD_W + 68) / 2, cy - 12, 2);
   tft.setTextColor(TFT_WHITE, TFT_BLACK);
@@ -390,7 +473,8 @@ void throttleGate() {
     tft.setTextDatum(MC_DATUM);
     tft.setTextPadding(tft.textWidth("100%", 2));
     tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-    tft.drawString(b, (LCD_W + 68) / 2, LCD_H / 2 + 26, 2);
+    if (PORTRAIT) tft.drawString(b, LCD_W / 2, 212, 2);
+    else tft.drawString(b, (LCD_W + 68) / 2, LCD_H / 2 + 26, 2);
     vTaskDelay(pdMS_TO_TICKS(100));
   }
 }
@@ -475,26 +559,28 @@ void buildTeleStrip(char* out, size_t n, const CrsfLink& l) {
 uint16_t batteryColor(int pct);  // fwd decls (defined with the battery page, below)
 void drawBatteryIcon(int x, int y, int w, int h, int pct, uint16_t fill);
 
-// Bottom row: the 10 toggle states as cells (ON = green, OFF = dark), sprite-blitted.
+// Bottom strip: the 10 toggle states as cells (ON = green, OFF = dark), sprite-blitted.
+// One row of 10 in landscape; two rows of 5 in portrait.
 void drawToggleStates(uint16_t mask) {
+  constexpr int COLS = PORTRAIT ? 5 : 10, ROWS = 10 / COLS;
+  constexpr int CW = LCD_W / COLS;  // 28 px per cell (15 in portrait)
   TFT_eSprite spr(&tft);
-  spr.createSprite(LCD_W, 16);
+  spr.createSprite(LCD_W, 16 * ROWS);
   spr.setTextFont(1);
   spr.setTextSize(1);
   spr.fillSprite(TFT_BLACK);
-  constexpr int CW = LCD_W / 10;  // 28 px per cell
   for (int i = 0; i < 10; ++i) {
-    int x = i * CW + 1;
+    int x = (i % COLS) * CW + 1, y = (i / COLS) * 16;
     bool on = mask & (1u << i);
     uint16_t bg = on ? TFT_GREEN : 0x2965;  // dark grey when off
-    spr.fillRoundRect(x, 1, CW - 2, 14, 2, bg);
+    spr.fillRoundRect(x, y + 1, CW - 2, 14, 2, bg);
     char n[4];
     snprintf(n, sizeof(n), "%d", i + 1);
     spr.setTextDatum(MC_DATUM);
     spr.setTextColor(on ? TFT_BLACK : TFT_DARKGREY, bg);
-    spr.drawString(n, x + (CW - 2) / 2, 8, 1);
+    spr.drawString(n, x + (CW - 2) / 2, y + 8, 1);
   }
-  spr.pushSprite(0, 60);
+  spr.pushSprite(0, LCD_H - 16 * ROWS);
   spr.deleteSprite();
 }
 
@@ -539,14 +625,52 @@ bool flightModeStr(char* out, size_t n, uint16_t* colOut) {
 
 void drawRcStatic() { tft.fillScreen(COL_BG); }
 
+// Portrait telemetry block: the selected items stacked one per line (landscape packs them
+// into a single strip). Font 2 while they fit the 9-line area, font 1 (12 lines) beyond.
+// Every line is sprite-blitted each frame, blanks included, so stale rows clear themselves.
+void drawTeleLines(const CrsfLink& l, bool ever, bool online) {
+  constexpr int Y0 = 104, AREA_H = 144;
+  int count = 0;
+  for (int i = 0; i < TELE_N; ++i)
+    if (g_telemSel & (1u << i)) ++count;
+  const int pitch = (count > AREA_H / 16) ? 12 : 16;
+  TFT_eSprite spr(&tft);
+  spr.createSprite(LCD_W, pitch);
+  spr.setTextFont(1);
+  spr.setTextSize(1);
+  spr.setTextDatum(ML_DATUM);
+  spr.setTextPadding(0);
+  spr.setTextColor(online ? TFT_GREENYELLOW : TFT_RED, TFT_BLACK);
+  int item = 0;
+  for (int s = 0; s < AREA_H / pitch; ++s) {
+    char part[16] = "";
+    if (g_telemSel == 0) {
+      // nothing selected — leave the block blank
+    } else if (!online && !ever) {
+      if (s == 0) snprintf(part, sizeof(part), "NO TELEMETRY");
+    } else {
+      while (item < TELE_N && !(g_telemSel & (1u << item))) ++item;
+      if (item < TELE_N) teleShort(item++, l, part, sizeof(part));
+    }
+    spr.fillSprite(TFT_BLACK);
+    if (part[0]) {
+      bool big = (pitch == 16) && tft.textWidth(part, 2) <= LCD_W - 3;
+      spr.drawString(part, 2, pitch / 2, big ? 2 : 1);
+    }
+    spr.pushSprite(0, Y0 + s * pitch);
+  }
+  spr.deleteSprite();
+}
+
 void renderRc(bool force) {
   PowerReading pr;
   bool ok = power_get(pr);
   int pct = ok ? batteryPct(pr.voltage_V) : -1;
   char b[16];
 
-  // Top-right banner. "TX OFF" (output disabled) overrides the arm state; otherwise red
-  // ARMED / green DISARMED / grey NO ARM. Drawn every frame (padding clears it).
+  // Arm banner (top-right; its own line under the battery row in portrait). "TX OFF"
+  // (output disabled) overrides the arm state; otherwise red ARMED / green DISARMED /
+  // grey NO ARM. Drawn every frame (padding clears it).
   int as = crsf_arm_state();
   const char* at;
   uint16_t ac;
@@ -557,10 +681,16 @@ void renderRc(bool force) {
     at = (as < 0) ? "NO ARM" : (as == 0 ? "DISARMED" : "ARMED");
     ac = (as < 0) ? TFT_DARKGREY : (as == 0 ? TFT_GREEN : TFT_RED);
   }
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextPadding(96);
   tft.setTextColor(ac, TFT_BLACK);
-  tft.drawString(at, LCD_W - 4, 10, 2);
+  if (PORTRAIT) {
+    tft.setTextDatum(MC_DATUM);
+    tft.setTextPadding(LCD_W);
+    tft.drawString(at, LCD_W / 2, 34, 2);
+  } else {
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextPadding(96);
+    tft.drawString(at, LCD_W - 4, 10, 2);
+  }
 
   // Small battery icon with % inside (top-left), change-driven.
   static int last_pct = -999;
@@ -579,15 +709,18 @@ void renderRc(bool force) {
   int vi = ok ? (int)(pr.voltage_V * 100 + 0.5f) : -1;
   if (force || vi != last_v) {
     last_v = vi;
-    if (ok) snprintf(b, sizeof(b), "%.2fV", pr.voltage_V);
-    else snprintf(b, sizeof(b), "--V");
+    if (!ok) snprintf(b, sizeof(b), "--V");
+    else if (PORTRAIT && pr.voltage_V >= 9.995f)  // only 5 glyphs fit beside the icon
+      snprintf(b, sizeof(b), "%.1fV", pr.voltage_V);
+    else snprintf(b, sizeof(b), "%.2fV", pr.voltage_V);
     tft.setTextDatum(ML_DATUM);
-    tft.setTextPadding(72);
+    tft.setTextPadding(PORTRAIT ? 40 : 72);
     tft.setTextColor(TFT_CYAN, TFT_BLACK);
-    tft.drawString(b, 42, 10, 2);
+    tft.drawString(b, PORTRAIT ? 36 : 42, 10, 2);
   }
 
-  // Flight mode (top-center) from the assigned mode toggles, change-driven.
+  // Flight mode (top-center; third line in portrait) from the assigned mode toggles,
+  // change-driven.
   static char last_mode[16] = "?";
   static uint16_t last_mcol = 0;
   char mode[16];
@@ -597,9 +730,9 @@ void renderRc(bool force) {
     strcpy(last_mode, mode);
     last_mcol = mcol;
     tft.setTextDatum(MC_DATUM);
-    tft.setTextPadding(80);
+    tft.setTextPadding(PORTRAIT ? LCD_W : 80);
     tft.setTextColor(mcol, TFT_BLACK);
-    tft.drawString(mode, LCD_W / 2, 10, 2);
+    tft.drawString(mode, LCD_W / 2, PORTRAIT ? 54 : 10, 2);
   }
 
   // Telemetry details (middle), sprite-blitted each frame (values update live). Green when
@@ -607,28 +740,33 @@ void renderRc(bool force) {
   CrsfLink l;
   bool ever = crsf_get(l);
   bool online = crsf_telem_online();
-  char strip[64];
-  buildTeleStrip(strip, sizeof(strip), l);
-  TFT_eSprite spr(&tft);
-  spr.createSprite(LCD_W, 16);
-  spr.fillSprite(TFT_BLACK);
-  spr.setTextFont(2);
-  spr.setTextSize(1);
-  spr.setTextDatum(ML_DATUM);
-  spr.setTextPadding(0);
-  if (g_telemSel == 0) {
-    // nothing selected — leave the strip blank
-  } else if (online) {
-    spr.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
-    spr.drawString(strip, 2, 8, 2);
+  if (PORTRAIT) {
+    drawTeleLines(l, ever, online);
   } else {
-    spr.setTextColor(TFT_RED, TFT_BLACK);
-    spr.drawString(ever ? strip : "NO TELEMETRY", 2, 8, 2);
+    char strip[64];
+    buildTeleStrip(strip, sizeof(strip), l);
+    TFT_eSprite spr(&tft);
+    spr.createSprite(LCD_W, 16);
+    spr.fillSprite(TFT_BLACK);
+    spr.setTextFont(2);
+    spr.setTextSize(1);
+    spr.setTextDatum(ML_DATUM);
+    spr.setTextPadding(0);
+    if (g_telemSel == 0) {
+      // nothing selected — leave the strip blank
+    } else if (online) {
+      spr.setTextColor(TFT_GREENYELLOW, TFT_BLACK);
+      spr.drawString(strip, 2, 8, 2);
+    } else {
+      spr.setTextColor(TFT_RED, TFT_BLACK);
+      spr.drawString(ever ? strip : "NO TELEMETRY", 2, 8, 2);
+    }
+    spr.pushSprite(0, 30);
+    spr.deleteSprite();
   }
-  spr.pushSprite(0, 30);
-  spr.deleteSprite();
 
-  // Flight timer (small, above the toggle row), change-driven.
+  // Flight timer, change-driven: small above the toggle row (landscape) / large and
+  // centered above the telemetry block (portrait).
   static uint32_t last_s = 0xFFFFFFFFu;
   static int last_armed = -1;
   uint32_t s = flightTimerSession();
@@ -637,10 +775,16 @@ void renderRc(bool force) {
     last_s = s;
     last_armed = armed;
     snprintf(b, sizeof(b), "%02lu:%02lu", (unsigned long)(s / 60), (unsigned long)(s % 60));
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextPadding(48);
     tft.setTextColor(g_fltArmed ? TFT_WHITE : TFT_DARKGREY, TFT_BLACK);
-    tft.drawString(b, 4, 52, 1);
+    if (PORTRAIT) {
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextPadding(70);
+      tft.drawString(b, LCD_W / 2, 82, 4);
+    } else {
+      tft.setTextDatum(ML_DATUM);
+      tft.setTextPadding(48);
+      tft.drawString(b, 4, 52, 1);
+    }
   }
 
   // 10 toggle states (bottom), change-driven sprite.
@@ -657,8 +801,10 @@ void renderRc(bool force) {
 // roll >1800 = OK (enter), <1200 = CANCEL (back).
 bool toggleOn(int bit);  // fwd decl (defined below)
 
-const char* const MENU_ITEMS[] = {"GIMBALS & TRIM", "TOGGLE MAPPING", "BATTERY INFO",
-                                   "TELEMETRY",      "CRSF MODULE",    "REBOOT"};
+const char* const MENU_ITEMS[] = {
+    lp("GIMBALS & TRIM", "GIMBALS"), lp("TOGGLE MAPPING", "TOGGLES"),
+    lp("BATTERY INFO", "BATTERY"),   "TELEMETRY",
+    lp("CRSF MODULE", "CRSF"),       "REBOOT"};
 constexpr int MENU_N = 6;
 
 struct RawKeys {
@@ -697,20 +843,59 @@ struct EdgeKey {
   }
 };
 
-// Shared scrolling-list geometry: 4 rows visible at font 2 (16px) on the 76px panel.
-constexpr int LIST_VISIBLE = 4;
+// Shared scrolling-list geometry: font 2 (16px) rows under the header. Landscape shows
+// 4 rows on the 76px-high panel under a one-line header; portrait shows 16 under a
+// two-line header (title, then the hint).
+constexpr int HDR_H = PORTRAIT ? 24 : 12;
 constexpr int LIST_ROW_H = 16;
-constexpr int LIST_ROW_Y0 = 20;  // center-y of the first visible row (below header)
+constexpr int LIST_VISIBLE = (LCD_H - HDR_H) / LIST_ROW_H;  // 4 / 16
+constexpr int LIST_ROW_Y0 = HDR_H + LIST_ROW_H / 2;  // center-y of the first visible row
+constexpr int LIST_TEXT_X = PORTRAIT ? 2 : 8;        // plain-label rows
+constexpr int BUL_X = PORTRAIT ? 6 : 9;              // bullet rows: bullet center-x ...
+constexpr int BUL_TEXT_X = PORTRAIT ? 14 : 22;       // ... and the label after it
+
+// Header strip: clears it and draws the yellow title (y only applies in landscape).
+void drawHeaderTitle(const char* title, int y = 5) {
+  tft.fillRect(0, 0, LCD_W, HDR_H, COL_BG);
+  // Portrait rows stop a few px short of the glass; clear that leftover strip here so
+  // the list pages still fully repaint without a (flashing) fillScreen.
+  constexpr int TAIL = (LCD_H - HDR_H) % LIST_ROW_H;
+  if (TAIL) tft.fillRect(0, LCD_H - TAIL, LCD_W, TAIL, COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString(title, PORTRAIT ? 2 : 4, PORTRAIT ? 5 : y, 1);
+}
+
+// Header hint/status: right of the title in landscape, on its own second line in portrait
+// (keep portrait strings <= 12 chars). pad != 0 = overwrite-in-place for live status.
+void drawHeaderHint(const char* hint, uint16_t col, int pad = 0, int y = 5) {
+  tft.setTextColor(col, COL_BG);
+  if (PORTRAIT) {
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextPadding(pad ? LCD_W - 2 : 0);
+    tft.drawString(hint, 2, 16, 1);
+  } else {
+    tft.setTextDatum(MR_DATUM);
+    tft.setTextPadding(pad);
+    tft.drawString(hint, LCD_W - 4, y, 1);
+  }
+  tft.setTextPadding(0);
+}
+
+// "OK = yes / CXL = no" prompt for the confirm dialogs (caller sets datum MC + colour).
+void drawYesNo(int y) {
+  if (PORTRAIT) {
+    tft.drawString("OK = yes", LCD_W / 2, y, 2);
+    tft.drawString("CXL = no", LCD_W / 2, y + 18, 2);
+  } else {
+    tft.drawString("OK = yes     CXL = no", LCD_W / 2, y, 1);
+  }
+}
 
 void drawMenuHeader() {
-  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextPadding(0);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("CONFIG", 4, 5, 1);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("OK:enter  CXL:exit", LCD_W - 4, 5, 1);
+  drawHeaderTitle("CONFIG");
+  drawHeaderHint(lp("OK:enter  CXL:exit", "OK:enter"), TFT_DARKGREY);
 }
 
 // Draw one visible menu row into an off-screen sprite and blit it once (no flash).
@@ -727,14 +912,15 @@ void drawMenuRow(int slot, int idx, bool sel) {
     spr.setTextDatum(ML_DATUM);
     spr.setTextPadding(0);
     spr.setTextColor(sel ? TFT_WHITE : TFT_DARKGREY, bg);
-    spr.drawString(MENU_ITEMS[idx], 8, LIST_ROW_H / 2, 2);
+    spr.drawString(MENU_ITEMS[idx], LIST_TEXT_X, LIST_ROW_H / 2,
+                   fitFont(MENU_ITEMS[idx], 2, LCD_W - LIST_TEXT_X - 1));
   }
   spr.pushSprite(0, y - LIST_ROW_H / 2);
   spr.deleteSprite();
 }
 
 void drawMenuListFull(int scroll, int sel) {
-  // Header + 4 sprite rows cover the panel, so no fillScreen (which would flash).
+  // Header + sprite rows cover the panel, so no fillScreen (which would flash).
   drawMenuHeader();
   for (int s = 0; s < LIST_VISIBLE; ++s) {
     int idx = scroll + s;
@@ -744,47 +930,58 @@ void drawMenuListFull(int scroll, int sel) {
 
 // --- Menu item: Telemetry — live CRSF link stats; OK toggles "show on main screen". ---
 void drawTeleHeader() {
-  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
-  tft.setTextPadding(0);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("TELEMETRY", 4, 5, 1);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("OK:main  CXL:back", LCD_W - 4, 5, 1);
+  drawHeaderTitle("TELEMETRY");
+  drawHeaderHint(lp("OK:main  CXL:back", "OK:show/hide"), TFT_DARKGREY);
 }
 
-// One telemetry row: selection bullet + name (left) + live value (right). Sprite blit.
+// Telemetry rows: one list row in landscape (name left, value right); in portrait name
+// and value can't share 76 px, so each item takes a double-height row (name over value).
+constexpr int TE_ROW_H = PORTRAIT ? 2 * LIST_ROW_H : LIST_ROW_H;
+constexpr int TE_VISIBLE = (LCD_H - HDR_H) / TE_ROW_H;  // 4 / 8
+constexpr int TE_ROW_Y0 = HDR_H + TE_ROW_H / 2;
+
+// One telemetry row: selection bullet + name + live value. Sprite blit.
 void drawTeleRow(int slot, int item, bool cursor, const CrsfLink& l, bool lok) {
-  int y = LIST_ROW_Y0 + slot * LIST_ROW_H;
+  int y = TE_ROW_Y0 + slot * TE_ROW_H;
   uint16_t bg = cursor ? TFT_NAVY : COL_BG;
   TFT_eSprite spr(&tft);
-  spr.createSprite(LCD_W, LIST_ROW_H);
+  spr.createSprite(LCD_W, TE_ROW_H);
   spr.setTextFont(1);  // init inherited text state (gfxFont/size are garbage in a new sprite)
   spr.setTextSize(1);
   spr.fillSprite(bg);
   if (item >= 0 && item < TELE_N) {
-    int cy = LIST_ROW_H / 2;
     bool on = g_telemSel & (1u << item);
-    // selection bullet: filled yellow = shown on main; hollow grey = not.
-    if (on) spr.fillCircle(9, cy, 4, TFT_YELLOW);
-    else spr.drawCircle(9, cy, 4, TFT_DARKGREY);
-    spr.setTextDatum(ML_DATUM);
-    spr.setTextPadding(0);
-    spr.setTextColor(TFT_WHITE, bg);
-    spr.drawString(TELE_ITEMS[item].name, 22, cy, 2);
     char v[16];
     teleValue(item, l, lok, v, sizeof(v));
-    spr.setTextDatum(MR_DATUM);
-    spr.setTextColor(lok ? TFT_CYAN : TFT_DARKGREY, bg);
-    spr.drawString(v, LCD_W - 6, cy, 2);
+    spr.setTextPadding(0);
+    // selection bullet: filled yellow = shown on main; hollow grey = not.
+    if (PORTRAIT) {
+      if (on) spr.fillCircle(4, 8, 3, TFT_YELLOW);
+      else spr.drawCircle(4, 8, 3, TFT_DARKGREY);
+      spr.setTextDatum(ML_DATUM);
+      spr.setTextColor(TFT_WHITE, bg);
+      spr.drawString(TELE_ITEMS[item].name, 10, 8, 1);
+      spr.setTextDatum(MR_DATUM);
+      spr.setTextColor(lok ? TFT_CYAN : TFT_DARKGREY, bg);
+      spr.drawString(v, LCD_W - 2, 23, 2);
+    } else {
+      int cy = TE_ROW_H / 2;
+      if (on) spr.fillCircle(9, cy, 4, TFT_YELLOW);
+      else spr.drawCircle(9, cy, 4, TFT_DARKGREY);
+      spr.setTextDatum(ML_DATUM);
+      spr.setTextColor(TFT_WHITE, bg);
+      spr.drawString(TELE_ITEMS[item].name, 22, cy, 2);
+      spr.setTextDatum(MR_DATUM);
+      spr.setTextColor(lok ? TFT_CYAN : TFT_DARKGREY, bg);
+      spr.drawString(v, LCD_W - 6, cy, 2);
+    }
   }
-  spr.pushSprite(0, y - LIST_ROW_H / 2);
+  spr.pushSprite(0, y - TE_ROW_H / 2);
   spr.deleteSprite();
 }
 
 void drawTeleVisible(int scroll, int cursor, const CrsfLink& l, bool lok) {
-  for (int s = 0; s < LIST_VISIBLE; ++s) {
+  for (int s = 0; s < TE_VISIBLE; ++s) {
     int item = scroll + s;
     drawTeleRow(s, item, item == cursor, l, lok);
   }
@@ -810,24 +1007,16 @@ void drawPowerHeader(uint16_t now_mw, int sent, bool force) {
   if (!force && (int)now_mw == last_now && sent == last_sent) return;
   last_now = now_mw;
   last_sent = sent;
-  if (force) {
-    tft.fillRect(0, 0, LCD_W, 12, COL_BG);
-    tft.setTextPadding(0);
-    tft.setTextDatum(ML_DATUM);
-    tft.setTextColor(TFT_YELLOW, COL_BG);
-    tft.drawString("TX POWER", 4, 5, 1);
-  }
+  if (force) drawHeaderTitle("TX POWER");
   char nows[8];
   if (now_mw) snprintf(nows, sizeof(nows), "%u", now_mw);
   else snprintf(nows, sizeof(nows), "--");
   char b[28];
-  if (sent >= 0) snprintf(b, sizeof(b), "NOW:%s SET:%u", nows, POWER_MW[sent]);
+  // Portrait has room for NOW only; the level we SET is the cyan row in the list.
+  if (PORTRAIT) snprintf(b, sizeof(b), "NOW:%s mW", nows);
+  else if (sent >= 0) snprintf(b, sizeof(b), "NOW:%s SET:%u", nows, POWER_MW[sent]);
   else snprintf(b, sizeof(b), "NOW:%s  OK:set", nows);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextPadding(150);
-  tft.setTextColor(sent >= 0 ? TFT_GREEN : TFT_DARKGREY, COL_BG);
-  tft.drawString(b, LCD_W - 4, 5, 1);
-  tft.setTextPadding(0);
+  drawHeaderHint(b, sent >= 0 ? TFT_GREEN : TFT_DARKGREY, 150);
 }
 
 // green bullet = module's current power (telemetry); cyan text = the level we last sent.
@@ -841,13 +1030,13 @@ void drawPowerRow(int slot, int idx, bool cursor, uint16_t now_mw, int sent) {
   spr.fillSprite(bg);
   if (idx >= 0 && idx < POWER_N) {
     int cy = LIST_ROW_H / 2;
-    if (now_mw == POWER_MW[idx]) spr.fillCircle(9, cy, 4, TFT_GREEN);
-    else spr.drawCircle(9, cy, 4, TFT_DARKGREY);
+    if (now_mw == POWER_MW[idx]) spr.fillCircle(BUL_X, cy, 4, TFT_GREEN);
+    else spr.drawCircle(BUL_X, cy, 4, TFT_DARKGREY);
     char b[12];
     snprintf(b, sizeof(b), "%u mW", POWER_MW[idx]);
     spr.setTextDatum(ML_DATUM);
     spr.setTextColor(idx == sent ? TFT_CYAN : TFT_WHITE, bg);
-    spr.drawString(b, 22, cy, 2);
+    spr.drawString(b, BUL_TEXT_X, cy, fitFont(b, 2, LCD_W - BUL_TEXT_X - 1));
   }
   spr.pushSprite(0, y - LIST_ROW_H / 2);
   spr.deleteSprite();
@@ -874,18 +1063,14 @@ constexpr int FAN_N = 9;
 constexpr int FAN_FIELD = 8;  // Max Power(6) -> Dynamic(7) -> Fan Thresh(8) on ELRS 3.4.x
 
 void drawSettingHeader(const char* title, int sent) {
-  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
-  tft.setTextPadding(0);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString(title, 4, 5, 1);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(sent >= 0 ? TFT_GREEN : TFT_DARKGREY, COL_BG);
-  tft.drawString(sent >= 0 ? "SAVED" : "OK:set  CXL:back", LCD_W - 4, 5, 1);
+  drawHeaderTitle(title);
+  drawHeaderHint(sent >= 0 ? "SAVED" : lp("OK:set  CXL:back", "OK:set"),
+                 sent >= 0 ? TFT_GREEN : TFT_DARKGREY);
 }
 
 // green bullet = module's current threshold; cyan text = the option we just wrote.
-void drawFanRow(int slot, const char* label, bool cursor, bool is_current, bool is_sent) {
+void drawFanRow(int slot, const char* label, bool cursor, bool is_current, bool is_sent,
+                int font) {
   int y = LIST_ROW_Y0 + slot * LIST_ROW_H;
   uint16_t bg = cursor ? TFT_NAVY : COL_BG;
   TFT_eSprite spr(&tft);
@@ -895,11 +1080,11 @@ void drawFanRow(int slot, const char* label, bool cursor, bool is_current, bool 
   spr.fillSprite(bg);
   if (label) {
     int cy = LIST_ROW_H / 2;
-    if (is_current) spr.fillCircle(9, cy, 4, TFT_GREEN);
-    else spr.drawCircle(9, cy, 4, TFT_DARKGREY);
+    if (is_current) spr.fillCircle(BUL_X, cy, 4, TFT_GREEN);
+    else spr.drawCircle(BUL_X, cy, 4, TFT_DARKGREY);
     spr.setTextDatum(ML_DATUM);
     spr.setTextColor(is_sent ? TFT_CYAN : TFT_WHITE, bg);
-    spr.drawString(label, 22, cy, 2);
+    spr.drawString(label, BUL_TEXT_X, cy, font);
   }
   spr.pushSprite(0, y - LIST_ROW_H / 2);
   spr.deleteSprite();
@@ -909,9 +1094,14 @@ void drawFanRow(int slot, const char* label, bool cursor, bool is_current, bool 
 // fillRect doesn't flash on every cursor move.
 void drawSettingRows(int scroll, int cursor, const char* const* labels, int n, int current,
                      int sent) {
+  // One font for the whole list: font 2 unless some label would overflow (portrait).
+  int font = 2;
+  for (int i = 0; i < n; ++i)
+    if (fitFont(labels[i], 2, LCD_W - BUL_TEXT_X - 1) < font) font = 1;
   for (int s = 0; s < LIST_VISIBLE; ++s) {
     int idx = scroll + s;
-    drawFanRow(s, idx < n ? labels[idx] : nullptr, idx == cursor, idx == current, idx == sent);
+    drawFanRow(s, idx < n ? labels[idx] : nullptr, idx == cursor, idx == current, idx == sent,
+               font);
   }
 }
 
@@ -924,8 +1114,9 @@ void drawSettingList(const char* title, int scroll, int cursor, const char* cons
 // --- Menu item: PACKET RATE (ELRS field 1). value = list index; verified via telemetry
 // rf_Mode. NOTE: at 400000 baud on this half-duplex module, rates above 333Hz are capped by
 // the module — the green dot (actual rf_Mode) reveals it. Use BAUD 921600 to unlock them. ---
-const char* const PKT_OPTS[] = {"50Hz",  "100Hz FULL", "150Hz", "250Hz",  "333Hz FULL",
-                                "500Hz", "D250",       "D500",  "F500",   "F1000"};
+const char* const PKT_OPTS[] = {
+    "50Hz",  lp("100Hz FULL", "100 FULL"), "150Hz", "250Hz", lp("333Hz FULL", "333 FULL"),
+    "500Hz", "D250",                       "D500",  "F500",  "F1000"};
 constexpr int PKT_N = 10;
 // rf_Mode (LinkStatistics enum_rate) the module reports for each option index above.
 const uint8_t PKT_RFMODE[PKT_N] = {2, 4, 5, 7, 8, 9, 10, 11, 12, 13};
@@ -948,13 +1139,8 @@ constexpr int BAUD_N = 2;
 // selected channel (saved to NVS), roll-left (CANCEL) backs out. Toggle5 OFF = view only.
 void drawGimbalPosStatic() {
   tft.fillScreen(COL_BG);
-  tft.setTextPadding(0);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("GIMBALS", 4, 6, 1);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("T5:edit/back  OK:flip", LCD_W - 4, 6, 1);
+  drawHeaderTitle("GIMBALS", 6);
+  drawHeaderHint(lp("T5:edit/back  OK:flip", "T5+OK:flip"), TFT_DARKGREY, 0, 6);
 }
 
 void drawGimbalPage(int cursor, bool edit) {
@@ -962,13 +1148,19 @@ void drawGimbalPage(int cursor, bool edit) {
   GimbalState g;
   gimbals_get(g);
   const int raw[4] = {g.throttle, g.yaw, g.pitch, g.roll};
-  const int top = 16, rowh = 15, bx = 30, bw = 150;
+  // Landscape: one line per channel (cursor, name, bar, %, flag). Portrait: the text
+  // fields share a line and the bar runs full-width under it.
+  const int top = PORTRAIT ? 30 : 16, rowh = PORTRAIT ? 34 : 15;
+  const int bx = PORTRAIT ? 2 : 30, bw = PORTRAIT ? LCD_W - 4 : 150;
+  const int pctx = PORTRAIT ? 52 : bx + bw + 34;  // right edge of the percent field
   char b[10];
   for (int i = 0; i < 4; ++i) {
     bool sel = edit && (i == cursor);
     bool fl = gconfig_flip(i);
     float pct = stickPct(i, raw[i]);  // flip-aware position
-    int y = top + i * rowh, cy = y + rowh / 2;
+    int y = top + i * rowh;
+    int cy = PORTRAIT ? y + 5 : y + rowh / 2;                  // text line center
+    int by = PORTRAIT ? y + 13 : y + 2, bh = PORTRAIT ? 12 : rowh - 4;  // bar
     int fw = constrain((int)(pct * bw / 100.0f), 0, bw);
 
     // Cursor (only in edit mode).
@@ -981,16 +1173,16 @@ void drawGimbalPage(int cursor, bool edit) {
     tft.setTextColor(sel ? TFT_YELLOW : TFT_CYAN, COL_BG);
     tft.drawString(NAME[i], 9, cy, 1);
     // Bar.
-    tft.fillRect(bx, y + 2, fw, rowh - 4, TFT_GREEN);
-    tft.fillRect(bx + fw, y + 2, bw - fw, rowh - 4, TFT_DARKGREY);
+    tft.fillRect(bx, by, fw, bh, TFT_GREEN);
+    tft.fillRect(bx + fw, by, bw - fw, bh, TFT_DARKGREY);
     // Percent.
     snprintf(b, sizeof(b), "%3d%%", (int)(pct + 0.5f));
     tft.setTextDatum(MR_DATUM);
-    tft.setTextPadding(30);
+    tft.setTextPadding(PORTRAIT ? 24 : 30);  // portrait: must not reach back into the name
     tft.setTextColor(TFT_WHITE, COL_BG);
-    tft.drawString(b, bx + bw + 34, cy, 1);
+    tft.drawString(b, pctx, cy, 1);
     // Reverse flag.
-    tft.setTextPadding(28);
+    tft.setTextPadding(PORTRAIT ? 18 : 28);
     tft.setTextColor(fl ? TFT_RED : TFT_DARKGREY, COL_BG);
     tft.drawString(fl ? "REV" : "NOR", LCD_W - 2, cy, 1);
   }
@@ -1001,9 +1193,9 @@ void drawRebootConfirm() {
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_RED, COL_BG);
-  tft.drawString("REBOOT?", LCD_W / 2, 24, 4);
+  tft.drawString("REBOOT?", LCD_W / 2, PORTRAIT ? 110 : 24, fitFont("REBOOT?", 4, LCD_W - 4));
   tft.setTextColor(TFT_WHITE, COL_BG);
-  tft.drawString("OK = yes     CXL = no", LCD_W / 2, 56, 1);
+  drawYesNo(PORTRAIT ? 150 : 56);
 }
 
 void doReboot() {
@@ -1011,7 +1203,7 @@ void doReboot() {
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("REBOOTING", LCD_W / 2, LCD_H / 2, 4);
+  tft.drawString("REBOOTING", LCD_W / 2, LCD_H / 2, fitFont("REBOOTING", 4, LCD_W - 4));
   vTaskDelay(pdMS_TO_TICKS(500));
   ESP.restart();
 }
@@ -1035,22 +1227,25 @@ void drawBatteryIcon(int x, int y, int w, int h, int pct, uint16_t fill) {
 
 void drawBatteryStatic() {
   tft.fillScreen(COL_BG);
-  tft.setTextPadding(0);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("BATTERY", 4, 6, 1);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString("CXL=back", LCD_W - 4, 6, 1);
+  drawHeaderTitle("BATTERY", 6);
+  drawHeaderHint("CXL=back", TFT_DARKGREY, 0, 6);
 
-  // Lifetime total flight time (accumulated armed seconds from NVS), below the icon.
+  // Lifetime total flight time (accumulated armed seconds from NVS), below the icon
+  // (landscape) / at the foot of the screen on two lines (portrait).
   uint32_t tot = storage_get_total_flight_secs();
   char b[28];
-  snprintf(b, sizeof(b), "TOTAL FLIGHT %luh%02lum", (unsigned long)(tot / 3600),
-           (unsigned long)((tot % 3600) / 60));
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_DARKGREY, COL_BG);
-  tft.drawString(b, 4, 70, 1);
+  if (PORTRAIT) {
+    snprintf(b, sizeof(b), "%luh%02lum", (unsigned long)(tot / 3600),
+             (unsigned long)((tot % 3600) / 60));
+    tft.drawString("TOTAL FLIGHT", 2, LCD_H - 24, 1);
+    tft.drawString(b, 2, LCD_H - 12, 1);
+  } else {
+    snprintf(b, sizeof(b), "TOTAL FLIGHT %luh%02lum", (unsigned long)(tot / 3600),
+             (unsigned long)((tot % 3600) / 60));
+    tft.drawString(b, 4, 70, 1);
+  }
 }
 
 // Redraw only what changed (force = redraw all, e.g. on page entry) to avoid the
@@ -1061,8 +1256,11 @@ void drawBatteryDynamic(bool force) {
   bool ok = power_get(pr);
   int pct = ok ? batteryPct(pr.voltage_V) : -1;
 
-  const int bx = 8, by = 24, bw = 96, bh = 40;
+  // Landscape: icon left, V/A/W column right. Portrait: icon on top, V/A/W under it.
+  const int bx = PORTRAIT ? 6 : 8, by = PORTRAIT ? 32 : 24;
+  const int bw = PORTRAIT ? 60 : 96, bh = PORTRAIT ? 34 : 40;
   const int rx = LCD_W - 4;
+  const int vy = PORTRAIT ? 88 : 24, vstep = PORTRAIT ? 22 : 20;  // V / A / W lines
   char b[16];
 
   if (force || pct != last_pct) {  // icon fill + % only on change
@@ -1072,7 +1270,7 @@ void drawBatteryDynamic(bool force) {
     snprintf(b, sizeof(b), ok ? "%d%%" : "--", p);
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(TFT_WHITE);  // transparent over the freshly-drawn fill
-    tft.drawString(b, bx + bw / 2, by + bh / 2, 4);
+    tft.drawString(b, bx + bw / 2, by + bh / 2, PORTRAIT ? 2 : 4);
   }
 
   int vi = ok ? (int)(pr.voltage_V * 100 + 0.5f) : -1;
@@ -1080,13 +1278,13 @@ void drawBatteryDynamic(bool force) {
   int pi = ok ? (int)(pr.power_mW / 10.0f + 0.5f) : -1;  // 0.01 W units
 
   tft.setTextDatum(MR_DATUM);
-  tft.setTextPadding(96);
+  tft.setTextPadding(PORTRAIT ? LCD_W - 6 : 96);
   if (force || vi != last_v) {
     last_v = vi;
     tft.setTextColor(TFT_WHITE, COL_BG);
     if (ok) snprintf(b, sizeof(b), "%.2f V", pr.voltage_V);
     else snprintf(b, sizeof(b), "-- V");
-    tft.drawString(b, rx, 24, 2);
+    tft.drawString(b, rx, vy, 2);
   }
   if (force || ii != last_i) {
     last_i = ii;
@@ -1094,14 +1292,14 @@ void drawBatteryDynamic(bool force) {
     if (!ok) snprintf(b, sizeof(b), "-- A");
     else if (fabsf(pr.current_mA) >= 1000.0f) snprintf(b, sizeof(b), "%.2f A", pr.current_mA / 1000.0f);
     else snprintf(b, sizeof(b), "%.0f mA", pr.current_mA);
-    tft.drawString(b, rx, 44, 2);
+    tft.drawString(b, rx, vy + vstep, 2);
   }
   if (force || pi != last_p) {
     last_p = pi;
     tft.setTextColor(TFT_GREENYELLOW, COL_BG);
     if (ok) snprintf(b, sizeof(b), "%.2f W", pr.power_mW / 1000.0f);
     else snprintf(b, sizeof(b), "-- W");
-    tft.drawString(b, rx, 64, 2);
+    tft.drawString(b, rx, vy + 2 * vstep, 2);
   }
 }
 
@@ -1116,23 +1314,18 @@ const char* const FUNC_NAMES[] = {"-",   "ARM", "ANGLE", "HORIZ", "ACRO",
 constexpr int FUNC_COUNT = 10;
 constexpr uint8_t FUNC_ARM = GFUNC_ARM;  // shared with crsf.cpp arm-safety
 
-// Scrolling list geometry (shares the main-menu list geometry).
-constexpr int TM_VISIBLE = LIST_VISIBLE;
-constexpr int TM_ROW_H = LIST_ROW_H;
-constexpr int TM_ROW_Y0 = LIST_ROW_Y0;
+// Scrolling list geometry. Landscape shares the main-menu rows (toggle, channel, function
+// across one line); portrait uses double-height rows (toggle + channel over function).
+constexpr int TM_ROW_H = PORTRAIT ? 2 * LIST_ROW_H : LIST_ROW_H;
+constexpr int TM_VISIBLE = (LCD_H - HDR_H) / TM_ROW_H;  // 4 / 8
+constexpr int TM_ROW_Y0 = HDR_H + TM_ROW_H / 2;
 
 void drawToggleHeader(bool editing, int field) {
-  tft.fillRect(0, 0, LCD_W, 12, COL_BG);  // clear header row only
-  tft.setTextPadding(0);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("TOGGLE MAP", 4, 5, 1);
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextColor(TFT_DARKGREY, COL_BG);
-  const char* hint = !editing       ? "OK:edit  CXL:back"
-                     : (field == 0) ? "edit CH   OK:next"
-                                    : "edit FUNC OK:save";
-  tft.drawString(hint, LCD_W - 4, 5, 1);
+  drawHeaderTitle("TOGGLE MAP");  // clears the header strip only
+  const char* hint = !editing       ? lp("OK:edit  CXL:back", "OK:edit")
+                     : (field == 0) ? lp("edit CH   OK:next", "CH   OK:next")
+                                    : lp("edit FUNC OK:save", "FUNC OK:save");
+  drawHeaderHint(hint, TFT_DARKGREY);
 }
 
 // Draw one visible row. slot = visual position 0..TM_VISIBLE-1; eidx = index into
@@ -1161,22 +1354,31 @@ void drawToggleRow(int slot, int eidx, bool sel, bool editing, int field) {
     uint16_t base = sel ? TFT_YELLOW : TFT_WHITE;
     uint16_t chCol = (sel && editing && field == 0) ? TFT_GREEN : base;
     uint16_t fnCol = (sel && editing && field == 1) ? TFT_GREEN : base;
-    int cy = TM_ROW_H / 2;  // vertical center inside the sprite
     spr.setTextDatum(ML_DATUM);
     spr.setTextPadding(0);
     spr.setTextColor(base, bg);
-    spr.drawString(ts, 8, cy, 2);
-    spr.setTextColor(chCol, bg);
-    spr.drawString(cs, 72, cy, 2);
-    spr.setTextColor(fnCol, bg);
-    spr.drawString(fs, 150, cy, 2);
+    if (PORTRAIT) {
+      spr.drawString(ts, 2, 8, 2);
+      spr.setTextDatum(MR_DATUM);
+      spr.setTextColor(chCol, bg);
+      spr.drawString(cs, LCD_W - 2, 8, 2);
+      spr.setTextColor(fnCol, bg);
+      spr.drawString(fs, LCD_W - 2, 24, 2);
+    } else {
+      int cy = TM_ROW_H / 2;  // vertical center inside the sprite
+      spr.drawString(ts, 8, cy, 2);
+      spr.setTextColor(chCol, bg);
+      spr.drawString(cs, 72, cy, 2);
+      spr.setTextColor(fnCol, bg);
+      spr.drawString(fs, 150, cy, 2);
+    }
   }
   spr.pushSprite(0, y - TM_ROW_H / 2);
   spr.deleteSprite();
 }
 
 void drawToggleListFull(int scroll, int cursor, bool editing, int field) {
-  // Header + 4 sprite rows fully cover the panel, so no fillScreen (which would flash).
+  // Header + sprite rows fully cover the panel, so no fillScreen (which would flash).
   drawToggleHeader(editing, field);
   for (int s = 0; s < TM_VISIBLE; ++s) {
     int eidx = scroll + s;
@@ -1186,9 +1388,10 @@ void drawToggleListFull(int scroll, int cursor, bool editing, int field) {
 
 // --- Menu item 4: CRSF module status (BetaFPV Nano TX V2).
 // CRSF MODULE submenu: OUTPUT toggle + links to the module-config pages + WiFi setup.
-const char* const CRSF_ITEMS[] = {"OUTPUT",      "TX POWER",     "FAN THRESHOLD",
-                                  "PACKET RATE", "BAUD RATE",    "BLE JOYSTICK",
-                                  "WIFI SETUP"};
+const char* const CRSF_ITEMS[] = {
+    "OUTPUT",                        "TX POWER",  lp("FAN THRESHOLD", "FAN"),
+    lp("PACKET RATE", "PKT RATE"),   "BAUD RATE", lp("BLE JOYSTICK", "BLE JOY"),
+    "WIFI SETUP"};
 constexpr int CRSF_N = 7;
 constexpr int CRSF_ITEM_OUTPUT = 0;
 constexpr int CRSF_ITEM_BLE = 5;
@@ -1217,17 +1420,15 @@ void drawCrsfMenuStatus(bool force) {
     char rate[10];
     if (pi >= 0) snprintf(rate, sizeof(rate), "%s", PKT_OPTS[pi]);
     else snprintf(rate, sizeof(rate), "--");
-    snprintf(b, sizeof(b), "%luk %s", (unsigned long)(crsf_get_baud() / 1000), rate);
+    // Portrait drops the "k " to stay within 12 chars: "921/333 FULL".
+    snprintf(b, sizeof(b), PORTRAIT ? "%lu/%s" : "%luk %s",
+             (unsigned long)(crsf_get_baud() / 1000), rate);
     col = TFT_GREEN;
   } else {
     snprintf(b, sizeof(b), "OFFLINE");
     col = TFT_RED;
   }
-  tft.setTextDatum(MR_DATUM);
-  tft.setTextPadding(150);  // overwrite the right-side box in one draw (no separate clear)
-  tft.setTextColor(col, COL_BG);
-  tft.drawString(b, LCD_W - 4, 5, 1);
-  tft.setTextPadding(0);
+  drawHeaderHint(b, col, 150);  // padded: overwrites the old status in one draw (no clear)
 }
 
 void drawCrsfMenuRow(int slot, int item, bool cursor) {
@@ -1242,18 +1443,23 @@ void drawCrsfMenuRow(int slot, int item, bool cursor) {
     int cy = LIST_ROW_H / 2;
     spr.setTextDatum(ML_DATUM);
     spr.setTextPadding(0);
+    // Portrait: the ON/OFF state drops to font 1 so it fits beside a font-2 label.
+    const int tx = PORTRAIT ? LIST_TEXT_X : 10;
+    const int vx = PORTRAIT ? LCD_W - 1 : LCD_W - 8, vfont = PORTRAIT ? 1 : 2;
+    const bool has_val = (item == CRSF_ITEM_OUTPUT || item == CRSF_ITEM_BLE);
     spr.setTextColor(cursor ? TFT_WHITE : TFT_DARKGREY, bg);
-    spr.drawString(CRSF_ITEMS[item], 10, cy, 2);
+    spr.drawString(CRSF_ITEMS[item], tx, cy,
+                   fitFont(CRSF_ITEMS[item], 2, LCD_W - tx - 1 - (has_val ? 20 : 0)));
     if (item == CRSF_ITEM_OUTPUT) {  // OUTPUT ON/OFF
       bool on = crsf_output_enabled();
       spr.setTextDatum(MR_DATUM);
       spr.setTextColor(on ? TFT_GREEN : TFT_RED, bg);
-      spr.drawString(on ? "ON" : "OFF", LCD_W - 8, cy, 2);
+      spr.drawString(on ? "ON" : "OFF", vx, cy, vfont);
     } else if (item == CRSF_ITEM_BLE) {  // BLE JOYSTICK ON/OFF
       bool on = ble_on();
       spr.setTextDatum(MR_DATUM);
       spr.setTextColor(on ? TFT_CYAN : TFT_DARKGREY, bg);
-      spr.drawString(on ? "ON" : "OFF", LCD_W - 8, cy, 2);
+      spr.drawString(on ? "ON" : "OFF", vx, cy, vfont);
     }
   }
   spr.pushSprite(0, y - LIST_ROW_H / 2);
@@ -1262,11 +1468,7 @@ void drawCrsfMenuRow(int slot, int item, bool cursor) {
 
 void drawCrsfMenu(int scroll, int cursor) {
   // Full redraw (entry / scroll): header strip + title once, then status + rows.
-  tft.fillRect(0, 0, LCD_W, 12, COL_BG);
-  tft.setTextPadding(0);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString("CRSF MODULE", 4, 5, 1);
+  drawHeaderTitle("CRSF MODULE");
   drawCrsfMenuStatus(true);
   for (int s = 0; s < LIST_VISIBLE; ++s) {
     int item = scroll + s;
@@ -1291,10 +1493,20 @@ void drawWifiConfirm() {
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_YELLOW, COL_BG);
+  if (PORTRAIT) {
+    tft.drawString("MODULE", LCD_W / 2, 84, 2);
+    tft.drawString("WIFI", LCD_W / 2, 102, 2);
+    tft.drawString("SETUP?", LCD_W / 2, 120, 2);
+    tft.setTextColor(TFT_WHITE, COL_BG);
+    tft.drawString("reboots with", LCD_W / 2, 144, 1);
+    tft.drawString("CRSF off", LCD_W / 2, 156, 1);
+    drawYesNo(184);
+    return;
+  }
   tft.drawString("MODULE WIFI SETUP?", LCD_W / 2, 16, 2);
   tft.setTextColor(TFT_WHITE, COL_BG);
   tft.drawString("reboots with CRSF off", LCD_W / 2, 38, 1);
-  tft.drawString("OK = yes     CXL = no", LCD_W / 2, 58, 1);
+  drawYesNo(58);
 }
 
 // Shown at boot while the WiFi-boot flag is set (CRSF never started).
@@ -1303,11 +1515,31 @@ void drawWifiSetup() {
   tft.setTextDatum(MC_DATUM);
   tft.setTextPadding(0);
   tft.setTextColor(TFT_CYAN, COL_BG);
+  // Handset TX is silent in this mode; the module auto-starts WiFi after its
+  // "Auto On WiFi" interval IF it powers up seeing no CRSF (so power-cycle it now).
+  if (PORTRAIT) {  // same steps, wrapped to 12 chars per line
+    tft.drawString("MODULE WIFI", LCD_W / 2, 8, 1);
+    tft.drawString("SETUP", LCD_W / 2, 20, 1);
+    static const char* const STEPS[] = {
+        "1.Power-",    "  cycle the", "  module now", "",
+        "2.Wait ~60s", "  TX silent", "",
+        "3.Join AP",   "  ExpressLRS", "  TX",        "  password:", "  expresslrs", "",
+        "4.Browse to", "  10.0.0.1"};
+    tft.setTextDatum(ML_DATUM);
+    tft.setTextColor(TFT_WHITE, COL_BG);
+    int y = 40;
+    for (const char* line : STEPS) {
+      tft.drawString(line, 2, y, 1);
+      y += line[0] ? 12 : 6;  // blank entry = half-line gap between steps
+    }
+    tft.setTextColor(TFT_YELLOW, COL_BG);
+    tft.drawString(MENU_ON_BOOT_BTN ? "Press BOOT" : "Toggle6 OFF", 2, LCD_H - 24, 1);
+    tft.drawString("= exit & fly", 2, LCD_H - 12, 1);
+    return;
+  }
   tft.drawString("MODULE WIFI SETUP", LCD_W / 2, 8, 1);
   tft.setTextDatum(ML_DATUM);
   tft.setTextColor(TFT_WHITE, COL_BG);
-  // Handset TX is silent in this mode; the module auto-starts WiFi after its
-  // "Auto On WiFi" interval IF it powers up seeing no CRSF (so power-cycle it now).
   tft.drawString("1. Power-cycle module now", 6, 20, 1);
   tft.drawString("2. Wait ~60s (TX stays silent)", 6, 32, 1);
   tft.drawString("3. AP: ExpressLRS TX  pw:expresslrs", 6, 44, 1);
@@ -1316,7 +1548,7 @@ void drawWifiSetup() {
   tft.drawString("Toggle6 OFF = exit & fly", 6, 68, 1);
 }
 
-// Config menu loop — runs while Toggle6 is ON; returns when it goes OFF.
+// Config menu loop — runs while menu mode is on (Toggle6 / pocket BOOT button).
 void configLoop() {
   // Main-menu pages come first (List..Reboot map to menu index via 1+sel); the CRSF
   // sub-pages follow and are reached only from the CRSF MODULE submenu.
@@ -1350,7 +1582,7 @@ void configLoop() {
   EdgeKey ku, kd, kok, kcx;
   const TickType_t period = pdMS_TO_TICKS(50);
 
-  while (toggleOn(TOGGLE6_BIT)) {
+  while (menuModeOn()) {
     flightTimerTick();  // keep banking flight time if armed while in config mode
     RawKeys r = readRawKeys();
     bool up = ku.poll(r.up), dn = kd.poll(r.down), ok = kok.poll(r.ok),
@@ -1528,7 +1760,7 @@ void configLoop() {
         bool lok = crsf_get(l);
         if (redraw) {
           if (te_cursor < te_scroll) te_scroll = te_cursor;
-          if (te_cursor >= te_scroll + LIST_VISIBLE) te_scroll = te_cursor - LIST_VISIBLE + 1;
+          if (te_cursor >= te_scroll + TE_VISIBLE) te_scroll = te_cursor - TE_VISIBLE + 1;
           drawTeleFull(te_scroll, te_cursor, l, lok);
           redraw = false;
           te_tick = 0;
@@ -1540,7 +1772,7 @@ void configLoop() {
         }
         if (dn && te_cursor < TELE_N - 1) {
           te_cursor++;
-          if (te_cursor >= te_scroll + LIST_VISIBLE) te_scroll = te_cursor - LIST_VISIBLE + 1;
+          if (te_cursor >= te_scroll + TE_VISIBLE) te_scroll = te_cursor - TE_VISIBLE + 1;
           drawTeleVisible(te_scroll, te_cursor, l, lok);
         }
         if (ok) {  // toggle "show on main screen" and persist
@@ -1605,7 +1837,7 @@ void configLoop() {
           }
           if (fan_cursor < fan_scroll) fan_scroll = fan_cursor;
           if (fan_cursor >= fan_scroll + LIST_VISIBLE) fan_scroll = fan_cursor - LIST_VISIBLE + 1;
-          drawSettingList("FAN THRESHOLD", fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
+          drawSettingList(lp("FAN THRESHOLD", "FAN THRESH"), fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
           redraw = false;
         }
         if (up && fan_cursor > 0) {
@@ -1623,7 +1855,7 @@ void configLoop() {
           crsf_param_set(FAN_FIELD, fan_cursor);
           fan_sent = fan_cursor;
           fan_current = fan_cursor;  // green dot moves to the new setting
-          drawSettingList("FAN THRESHOLD", fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
+          drawSettingList(lp("FAN THRESHOLD", "FAN THRESH"), fan_scroll, fan_cursor, FAN_OPTS, FAN_N, fan_current, fan_sent);
         }
         if (cx) {
           page = Page::Crsf;
@@ -1851,12 +2083,113 @@ bool toggleOn(int bit) {
   return sw.bits & (1u << bit);
 }
 
-// RC screen loop — runs while Toggle6 is OFF; returns when it goes ON.
+// ---- MCP23017 debug mode (Toggle3 + Toggle4 + Toggle5 all ON at power-up) ----
+// Shows all 16 expander inputs (A0-A7, B0-B7) live: a cell turns green while its pin is
+// triggered (pulled to GND), and keeps a white outline once it has been seen changing, so
+// a pin that works only intermittently still leaves a mark. Each cell also names the
+// toggle wired to that pin. Changes are logged to serial. CRSF output is silenced. The
+// toggles under test can't double as an exit, so the BOOT button (GPIO0) reboots out of
+// it — flip one of the three toggles OFF first or the combo re-enters on the way up.
+constexpr int TOGGLE3_BIT = 12;  // B4
+constexpr int TOGGLE4_BIT = 8;   // B0
+constexpr uint16_t MCP_DEBUG_COMBO =
+    (1u << TOGGLE3_BIT) | (1u << TOGGLE4_BIT) | (1u << TOGGLE5_BIT);
+// Toggle number wired to each MCP bit (0 = spare pin). Inverse of TOGGLE_BIT[] in crsf.cpp.
+constexpr uint8_t BIT_TOGGLE[16] = {7, 0, 0, 0, 0, 0, 0, 10, 4, 5, 6, 1, 3, 2, 9, 8};
+
+bool mcpDebugRequested() {
+  SwitchState sw;
+  return switches_get(sw) && (sw.bits & MCP_DEBUG_COMBO) == MCP_DEBUG_COMBO;
+}
+
+void mcpDebugLoop() {
+  // Landscape: port A on the top row, port B below, pins 0-7 left to right.
+  // Portrait: port A in the left column, port B right, pins 0-7 top to bottom.
+  constexpr int CW = PORTRAIT ? 37 : 35, CH = PORTRAIT ? 28 : 31;  // cell pitch
+  constexpr int X0 = PORTRAIT ? 1 : 2, Y0 = PORTRAIT ? 30 : 13;
+
+  crsf_set_output(false);  // bench mode: no throttle gate ran, so keep the link silent
+  pinMode(PIN_BOOT_BTN, INPUT_PULLUP);  // polled here (pocket's menu ISR is irrelevant now)
+  Serial.println("[mcpdbg] MCP23017 debug mode (BOOT button = reboot/exit)");
+
+  tft.fillScreen(COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString(lp("MCP23017 DEBUG", "MCP DEBUG"), PORTRAIT ? 2 : 4, 5, 1);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  if (PORTRAIT) {
+    tft.drawString("BOOT button", 2, LCD_H - 20, 1);
+    tft.drawString("= exit", 2, LCD_H - 9, 1);
+  } else {
+    tft.drawString("BOOT=exit", 110, 5, 1);
+  }
+
+  uint16_t last = 0, seen = 0;
+  int last_valid = -1;
+  bool first = true;
+  for (;;) {
+    SwitchState sw;
+    bool valid = switches_get(sw);
+    uint16_t bits = valid ? sw.bits : 0;
+    uint16_t changed = first ? 0xFFFF : (uint16_t)(bits ^ last);
+    if (!first) seen |= changed;
+
+    if (changed || (int)valid != last_valid) {  // raw word: hex, or the fault
+      char b[16];
+      if (valid) snprintf(b, sizeof(b), "0x%04X", bits);
+      else snprintf(b, sizeof(b), "NO MCP!");
+      tft.setTextColor(valid ? TFT_CYAN : TFT_RED, COL_BG);
+      if (PORTRAIT) {
+        tft.setTextDatum(ML_DATUM);
+        tft.setTextPadding(LCD_W - 2);
+        tft.drawString(b, 2, 17, 1);
+      } else {
+        tft.setTextDatum(MR_DATUM);
+        tft.setTextPadding(60);
+        tft.drawString(b, LCD_W - 4, 5, 1);
+      }
+      tft.setTextPadding(0);
+      Serial.printf("[mcpdbg] %s\n", b);
+    }
+
+    for (int i = 0; i < 16; ++i) {
+      if (!(changed & (1u << i))) continue;
+      int port = i / 8, pin = i % 8;
+      int x = X0 + (PORTRAIT ? port : pin) * CW, y = Y0 + (PORTRAIT ? pin : port) * CH;
+      bool on = bits & (1u << i);
+      uint16_t bg = on ? TFT_GREEN : 0x2965;  // dark grey when idle
+      tft.fillRoundRect(x, y, CW - 2, CH - 2, 3, bg);
+      if (seen & (1u << i)) tft.drawRoundRect(x, y, CW - 2, CH - 2, 3, TFT_WHITE);
+      char n[4];
+      snprintf(n, sizeof(n), "%c%d", port ? 'B' : 'A', pin);
+      tft.setTextDatum(MC_DATUM);
+      tft.setTextColor(on ? TFT_BLACK : TFT_LIGHTGREY, bg);
+      tft.drawString(n, x + (CW - 2) / 2, y + 9, 2);
+      if (BIT_TOGGLE[i]) {  // the toggle wired here
+        snprintf(n, sizeof(n), "T%d", BIT_TOGGLE[i]);
+        tft.setTextColor(on ? TFT_BLACK : TFT_DARKGREY, bg);
+        tft.drawString(n, x + (CW - 2) / 2, y + CH - 8, 1);
+      }
+    }
+
+    last = bits;
+    last_valid = valid;
+    first = false;
+    if (digitalRead(PIN_BOOT_BTN) == LOW) {  // exit: reboot back into the normal flow
+      Serial.println("[mcpdbg] BOOT pressed - rebooting");
+      doReboot();  // does not return
+    }
+    vTaskDelay(pdMS_TO_TICKS(20));  // matches the 50 Hz switch poll
+  }
+}
+
+// RC screen loop — runs while menu mode is off; returns when it comes on.
 void rcLoop() {
   drawRcStatic();
   bool first = true;  // force a full paint on the first frame (statics are change-driven)
   const TickType_t period = pdMS_TO_TICKS(200);  // ~5 Hz
-  while (!toggleOn(TOGGLE6_BIT)) {
+  while (!menuModeOn()) {
     flightTimerTick();
     renderRc(first);
     first = false;
@@ -1864,10 +2197,10 @@ void rcLoop() {
   }
 }
 
-// Live Toggle6 mode switch: OFF = RC screen, ON = configuration menu.
+// Live mode switch (menuModeOn): off = RC screen, on = configuration menu.
 void modeLoop() {
   for (;;) {
-    if (toggleOn(TOGGLE6_BIT)) configLoop();
+    if (menuModeOn()) configLoop();
     else rcLoop();
   }
 }
@@ -1886,6 +2219,7 @@ void appTask(void*) {
   tft.fillScreen(COL_BG);
   tft.setViewport(VP_X, VP_Y, LCD_W, LCD_H);
   backlightOn();
+  menuModeInit();
 
   Serial.printf("[ui] app up: %dx%d @ viewport(%d,%d) rot=%d\n", LCD_W, LCD_H, VP_X, VP_Y,
                 PANEL_ROTATION);
@@ -1906,13 +2240,21 @@ void appTask(void*) {
     // once the switch reading is valid so we don't exit before the MCP is read.
     for (;;) {
       SwitchState sw;
-      if (switches_get(sw) && !(sw.bits & (1u << TOGGLE6_BIT))) {
+      // Pocket: the reboot reset menu mode to off, so the next BOOT press is the exit.
+      bool leave = MENU_ON_BOOT_BTN
+                       ? menuModeOn()
+                       : (switches_get(sw) && !(sw.bits & (1u << TOGGLE6_BIT)));
+      if (leave) {
         safeSetWifiBoot(false);  // clear flag, reboot to normal
         doReboot();              // does not return
       }
       vTaskDelay(pdMS_TO_TICKS(100));
     }
   }
+
+  // Toggle3+4+5 all ON at power-up: MCP23017 input debug screen (does not return).
+  // Checked before the Toggle5 calibration trigger, which the combo would also satisfy.
+  if (mcpDebugRequested()) mcpDebugLoop();
 
   // Toggle5 ON at power-up forces a fresh calibration; otherwise use the stored one.
   // First boot (nothing stored) always calibrates.
@@ -1926,7 +2268,7 @@ void appTask(void*) {
 
   throttleGate();  // block while throttle > 15%
 
-  modeLoop();  // live Toggle6: Config vs RC (does not return)
+  modeLoop();  // live menu-mode switch: Config vs RC (does not return)
 }
 
 }  // namespace

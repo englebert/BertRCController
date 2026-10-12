@@ -26,3 +26,8 @@ static constexpr int PIN_GIMBAL_THROTTLE = 34;  // ADC1_CH6 (input-only)
 static constexpr int PIN_GIMBAL_YAW = 36;       // ADC1_CH0 (input-only)
 static constexpr int PIN_GIMBAL_PITCH = 33;     // ADC1_CH5
 static constexpr int PIN_GIMBAL_ROLL = 35;      // ADC1_CH7 (input-only)
+
+// ---- BOOT button (POCKETVERSION: menu-mode toggle; both builds: exit MCP debug) ----
+// GPIO0 is a strapping pin: fine as a button input once running (devkit has an external
+// pull-up, pressed = LOW), but holding it during reset enters the ROM download mode.
+static constexpr int PIN_BOOT_BTN = 0;

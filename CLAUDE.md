@@ -26,7 +26,20 @@ pio device monitor           # serial monitor (set monitor_speed in platformio.i
 pio run -t upload -t monitor # flash then monitor
 pio run -t clean             # clean build artifacts
 pio pkg update               # resolve/update platform + libs
+pio run -e pocket -t upload  # POCKETVERSION variant (portrait display) — see below
 ```
+
+- **Two envs:** `esp32` (default, landscape 284x76) and `pocket` (`-DPOCKETVERSION`, same
+  panel mounted portrait 76x284). The define only flips `PANEL_ROTATION` in
+  `src/display_cfg.h`; `ui.cpp` branches each screen's geometry on `PORTRAIT`
+  (`!PANEL_LANDSCAPE`) and uses `lp(landscape, portrait)` for labels that need a short
+  portrait form. Landscape numbers are hardware-tuned — don't change them when editing the
+  portrait side, and build **both** envs (`pio run -e esp32 -e pocket`) after any UI change.
+- **Pocket menu mode = BOOT button, not Toggle6.** Each press of BOOT (GPIO0, `PIN_BOOT_BTN`)
+  flips RC screen ↔ configuration mode (latched in a GPIO ISR, 250 ms debounce; always
+  boots to the RC screen). `menuModeOn()` in `ui.cpp` is the single mode source for both
+  builds. In MODULE WIFI SETUP a BOOT press exits. Toggle6 is still reserved/unmapped in
+  `gconfig.cpp` and does nothing in the pocket build.
 
 - **Verify the arduino-esp32 core is ≥ 3.0.0 after the first `pio run`** (see BUILD GOTCHA
   below) — 2.x builds will fail on `analogContinuous()`/`ledcAttach()`.
@@ -256,6 +269,10 @@ MCP bit numbering: A0–A7 = bits 0–7, B0–B7 = bits 8–15.
 Special toggles (read directly by the app/UI task, in addition to their channels):
 - **Toggle5 (B1)** ON at power-up → force the gimbal calibration wizard (circle sticks,
   min/max captured, center = (min+max)/2, stored in NVS).
+- **Toggle3 + Toggle4 + Toggle5 (B4, B0, B1)** all ON at power-up → MCP23017 debug screen
+  (`mcpDebugLoop()` in `ui.cpp`, both builds): all 16 inputs live, green = triggered, white
+  outline = seen changing; raw word logged to serial as `[mcpdbg] 0x....`. CRSF output is
+  silenced; BOOT button (GPIO0) reboots out of it (flip a combo toggle OFF first). Takes precedence over the Toggle5 calibration trigger.
 - **Toggle6 (B2)** live mode switch: ON = configuration mode (pitch = UP/DOWN keys,
   roll = OK/CANCEL, thresholds 1800/1200 on the 1000–2000 µs scale), OFF = RC screen.
 

@@ -23,8 +23,15 @@ static constexpr int PANEL_ROW_OFFSET = 18;  // Y / row start    (portrait)
 
 // ---- Orientation ----
 // TFT_eSPI rotations: 0/2 = portrait (76x284), 1/3 = landscape (284x76).
-// 1 = 90 deg clockwise. If it comes out upside-down for your mounting, use 3.
+// Standard build: 1 = 90 deg clockwise. If it comes out upside-down for your mounting, use 3.
+// POCKETVERSION build (env:pocket, -DPOCKETVERSION): the panel is mounted portrait, so
+// rotation 0 (use 2 if it comes out upside-down). ui.cpp picks its layout from
+// PANEL_LANDSCAPE below, so this is the only switch the variant needs.
+#ifdef POCKETVERSION
+static constexpr int PANEL_ROTATION = 0;
+#else
 static constexpr int PANEL_ROTATION = 1;
+#endif
 
 // ---- Derived logical screen + viewport (do not edit; follows from the above) ----
 static constexpr bool PANEL_LANDSCAPE = (PANEL_ROTATION & 1) != 0;
