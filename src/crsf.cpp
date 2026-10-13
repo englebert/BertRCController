@@ -2,6 +2,7 @@
 #include "crsf.h"
 
 #include <Arduino.h>
+#include <driver/gpio.h>
 
 #include "gconfig.h"
 #include "gimbals.h"
@@ -556,6 +557,100 @@ uint16_t crsf_tx_power_mw(uint8_t idx) {
   return idx < (sizeof(P) / sizeof(P[0])) ? P[idx] : 0;
 }
 
+
+namespace {
+// One pass of the three probes (see crsf.h). Pins must already be plain GPIOs.
+void wireProbe(CrsfWireTest& r) {
+  const gpio_num_t rx = (gpio_num_t)PIN_CRSF_RX, tx = (gpio_num_t)PIN_CRSF_TX;
+  constexpr int SETTLE_US = 300;  // >> RC of the 45k pulls into the pad + wiring capacitance
+
+  // idle: TX hi-Z, RX pulled each way.
+  gpio_set_direction(tx, GPIO_MODE_INPUT);
+  gpio_set_pull_mode(tx, GPIO_FLOATING);
+  gpio_set_direction(rx, GPIO_MODE_INPUT);
+  gpio_set_pull_mode(rx, GPIO_PULLUP_ONLY);
+  delayMicroseconds(SETTLE_US);
+  r.idle_pu = gpio_get_level(rx);
+  gpio_set_pull_mode(rx, GPIO_PULLDOWN_ONLY);
+  delayMicroseconds(SETTLE_US);
+  r.idle_pd = gpio_get_level(rx);
+
+  // loopback: TX drives, RX pulled the opposite way so a floating RX can't pass by luck.
+  gpio_set_level(tx, 1);
+  gpio_set_direction(tx, GPIO_MODE_OUTPUT);
+  delayMicroseconds(SETTLE_US);  // RX still pulled down
+  r.loop_hi = gpio_get_level(rx);
+  gpio_set_pull_mode(rx, GPIO_PULLUP_ONLY);
+  gpio_set_level(tx, 0);
+  delayMicroseconds(SETTLE_US);
+  r.loop_lo = gpio_get_level(rx);
+
+  // contend: only when a path exists, at the weakest drive so a real short stays well
+  // inside the pin ratings for the few hundred microseconds it lasts.
+  r.hold_a = r.hold_b = false;
+  if (r.loop_hi && !r.loop_lo) {
+    gpio_set_pull_mode(rx, GPIO_FLOATING);
+    gpio_set_drive_capability(rx, GPIO_DRIVE_CAP_0);
+    gpio_set_drive_capability(tx, GPIO_DRIVE_CAP_0);
+    gpio_set_direction(tx, GPIO_MODE_INPUT_OUTPUT);  // input stage on: read back own level
+    gpio_set_level(rx, 1);
+    gpio_set_direction(rx, GPIO_MODE_INPUT_OUTPUT);  // TX is still LOW
+    delayMicroseconds(SETTLE_US);
+    r.hold_a = gpio_get_level(rx) == 1 && gpio_get_level(tx) == 0;
+    gpio_set_level(rx, 0);
+    gpio_set_level(tx, 1);
+    delayMicroseconds(SETTLE_US);
+    r.hold_b = gpio_get_level(rx) == 0 && gpio_get_level(tx) == 1;
+  }
+
+  // Release both pins.
+  gpio_set_direction(rx, GPIO_MODE_INPUT);
+  gpio_set_direction(tx, GPIO_MODE_INPUT);
+  gpio_set_pull_mode(rx, GPIO_FLOATING);
+  gpio_set_drive_capability(rx, GPIO_DRIVE_CAP_DEFAULT);
+  gpio_set_drive_capability(tx, GPIO_DRIVE_CAP_DEFAULT);
+}
+}  // namespace
+
+CrsfWireTest crsf_wire_test() {
+  // Take the pins away from UART2 (the task is parked first so nothing is mid-frame).
+  const bool was_up = (g_task != nullptr);
+  if (was_up) {
+    crsf_pause();
+    uart.end();
+  }
+  gpio_reset_pin((gpio_num_t)PIN_CRSF_RX);  // back to plain GPIO function
+  gpio_reset_pin((gpio_num_t)PIN_CRSF_TX);
+
+  // Several passes: a module talking on the wire (or noise) shows up as disagreement.
+  constexpr int PASSES = 5;
+  CrsfWireTest r = {};
+  bool stable = true;
+  for (int i = 0; i < PASSES; ++i) {
+    CrsfWireTest p = {};
+    wireProbe(p);
+    if (i == 0) {
+      r = p;
+    } else if (p.idle_pu != r.idle_pu || p.idle_pd != r.idle_pd || p.loop_hi != r.loop_hi ||
+               p.loop_lo != r.loop_lo || p.hold_a != r.hold_a || p.hold_b != r.hold_b) {
+      stable = false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(2));
+  }
+
+  if (!stable) r.verdict = CrsfWire::Busy;
+  else if (!r.idle_pu) r.verdict = CrsfWire::HeldLow;  // nothing we drive can be trusted
+  else if (!(r.loop_hi && !r.loop_lo)) r.verdict = CrsfWire::Open;
+  else if (!(r.hold_a && r.hold_b)) r.verdict = CrsfWire::Short;
+  else r.verdict = CrsfWire::Ok;
+
+  if (was_up) {  // hand the pins back to UART2 exactly as crsf_start() set them up
+    uart.begin(g_crsf_baud, SERIAL_8N1, PIN_CRSF_RX, PIN_CRSF_TX);
+    uart.setTimeout(0);
+    crsf_resume();
+  }
+  return r;
+}
 
 void crsf_pause() {
   if (!g_task) return;             // task never started (e.g. module-WiFi mode)

@@ -89,6 +89,34 @@ void crsf_get_channels(uint16_t out[16]);
 // 0 = disarmed (throttle held at idle), 1 = armed. Safe from any task.
 int crsf_arm_state();
 
+// ---- CRSF wire self-test (debug mode): is the 1k series resistor fitted? ----
+// Wiring under test: GPIO17 (TX) --1k--> CRSF pad <-- GPIO16 (RX, direct). Neither pin has
+// an ADC, so this is three digital probes with the UART temporarily released:
+//   idle     - TX hi-Z: does the line follow RX's internal pulls, or is something holding it?
+//   loopback - TX driven HIGH then LOW against an opposing RX pull: RX must follow, which
+//              proves a path from TX to the pad (missing resistor / broken trace = OPEN).
+//   contend  - both pins driven to opposite levels at the weakest drive strength: with a
+//              series resistor each pin keeps its own level; with a 0-ohm bridge they fight
+//              to a common voltage and one of them reads wrong (= SHORT).
+// OK therefore means "a resistance of very roughly 300 ohm .. 10 k" - consistent with the
+// 1k part, not a measurement of it.
+enum class CrsfWire : uint8_t {
+  Ok,       // path present and not a short: resistor fitted
+  Open,     // RX does not follow TX: resistor missing / open circuit
+  Short,    // pins fight: resistor bridged (0 ohm) or far too low
+  HeldLow,  // line stuck low even with pull-up: pad shorted to GND or module unpowered
+  Busy,     // readings changed between passes (module transmitting / noise)
+};
+struct CrsfWireTest {
+  CrsfWire verdict;
+  bool idle_pu, idle_pd;  // idle: level read with RX pull-up / pull-down (TX hi-Z)
+  bool loop_hi, loop_lo;  // loopback: RX level with TX HIGH / TX LOW (want 1 / 0)
+  bool hold_a, hold_b;    // contend: both pins kept their level, RX=H/TX=L and RX=L/TX=H
+};
+// Run the test (~15 ms). Stops the CRSF UART for the duration and restores it afterwards;
+// call from the UI task only, with RC output already off (it glitches the wire).
+CrsfWireTest crsf_wire_test();
+
 // Pause/resume the CRSF task (stops UART traffic). Wrap NVS/flash writes with these —
 // UART interrupt activity during a flash-cache-disabled window can panic.
 void crsf_pause();

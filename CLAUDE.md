@@ -35,6 +35,8 @@ pio run -e pocket -t upload  # POCKETVERSION variant (portrait display) — see 
   (`!PANEL_LANDSCAPE`) and uses `lp(landscape, portrait)` for labels that need a short
   portrait form. Landscape numbers are hardware-tuned — don't change them when editing the
   portrait side, and build **both** envs (`pio run -e esp32 -e pocket`) after any UI change.
+- **Pocket battery = 1S** (max 4.2 V): battery % maps 3.0–4.2 V (`VBAT_CELLS` in `ui.cpp`);
+  the standard build stays 2S (6.0–8.4 V).
 - **Pocket menu mode = BOOT button, not Toggle6.** Each press of BOOT (GPIO0, `PIN_BOOT_BTN`)
   flips RC screen ↔ configuration mode (latched in a GPIO ISR, 250 ms debounce; always
   boots to the RC screen). `menuModeOn()` in `ui.cpp` is the single mode source for both
@@ -283,10 +285,16 @@ Special toggles (read directly by the app/UI task, in addition to their channels
 follow the pin map above, the pins named here are the defaults):
 - **Toggle5 (B1)** ON at power-up → force the gimbal calibration wizard (circle sticks,
   min/max captured, center = (min+max)/2, stored in NVS).
-- **Toggle3 + Toggle4 + Toggle5 (B4, B0, B1)** all ON at power-up → MCP23017 debug screen
-  (`mcpDebugLoop()` in `ui.cpp`, both builds): all 16 inputs live, green = triggered, white
-  outline = seen changing; raw word logged to serial as `[mcpdbg] 0x....`. CRSF output is
-  silenced; BOOT button (GPIO0) reboots out of it (flip a combo toggle OFF first). Takes precedence over the Toggle5 calibration trigger.
+- **Toggle3 + Toggle4 + Toggle5 (B4, B0, B1)** all ON at power-up → debug mode
+  (`debugLoop()` in `ui.cpp`, both builds). Pitch stick DOWN/UP = next/previous tool; BOOT
+  button (GPIO0) reboots out (flip a combo toggle OFF first). CRSF output is silenced.
+  Takes precedence over the Toggle5 calibration trigger. Tools:
+  1. **MCP23017 inputs** — all 16 pins live, green = triggered, white outline = seen
+     changing; raw word logged as `[mcpdbg] 0x....`.
+  2. **CRSF 1k resistor** — `crsf_wire_test()` in `crsf.cpp` releases UART2 and probes
+     GPIO16/17 digitally (neither has an ADC): loopback (RX must follow TX → else 1K
+     MISSING) and weak-drive contention (pins must hold opposite levels → else 1K SHORTED).
+     "OK" means roughly 300 Ω–10 kΩ, not a measurement of 1k. Logged as `[crsfdbg] ...`.
 - **Toggle6 (B2)** live mode switch: ON = configuration mode (pitch = UP/DOWN keys,
   roll = OK/CANCEL, thresholds 1800/1200 on the 1000–2000 µs scale), OFF = RC screen.
 

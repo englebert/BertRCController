@@ -47,9 +47,15 @@ int fitFont(const char* s, int maxFont, int avail) {
   return 1;
 }
 
-// Battery % mapping (2S): 6.0 V = 0%, 8.4 V = 100%.
-constexpr float VBAT_MIN = 6.0f;
-constexpr float VBAT_MAX = 8.4f;
+// Battery % mapping, 3.0 V/cell = 0%, 4.2 V/cell = 100%. The standard handset runs a 2S
+// pack (6.0..8.4 V); the POCKETVERSION is 1S only (3.0..4.2 V).
+#ifdef POCKETVERSION
+constexpr int VBAT_CELLS = 1;
+#else
+constexpr int VBAT_CELLS = 2;
+#endif
+constexpr float VBAT_MIN = 3.0f * VBAT_CELLS;
+constexpr float VBAT_MAX = 4.2f * VBAT_CELLS;
 
 // Startup safety: block until throttle is at/below this percent.
 constexpr float THROTTLE_GATE_PCT = 15.0f;
@@ -2178,37 +2184,62 @@ bool toggleOn(int toggle) {  // toggle index 0..9, read through its assigned MCP
   return gconfig_toggle_on(toggle, sw.bits);
 }
 
-// ---- MCP23017 debug mode (Toggle3 + Toggle4 + Toggle5 all ON at power-up) ----
-// Shows all 16 expander inputs (A0-A7, B0-B7) live: a cell turns green while its pin is
-// triggered (pulled to GND), and keeps a white outline once it has been seen changing, so
-// a pin that works only intermittently still leaves a mark. Each cell also names the
-// toggle wired to that pin. Changes are logged to serial. CRSF output is silenced. The
-// toggles under test can't double as an exit, so the BOOT button (GPIO0) reboots out of
-// it — flip one of the three toggles OFF first or the combo re-enters on the way up.
-bool mcpDebugRequested() { return toggleOn(TOGGLE3) && toggleOn(TOGGLE4) && toggleOn(TOGGLE5); }
+// ---- Debug mode (Toggle3 + Toggle4 + Toggle5 all ON at power-up) ----
+// A set of bench tools. Pitch stick DOWN = next tool, UP = previous (wraps). CRSF output
+// is silenced. The toggles can't double as an exit (they are under test), so the BOOT
+// button (GPIO0) reboots out of it — flip one of the three toggles OFF first or the
+// combo re-enters on the way up.
+//   1. MCP23017 inputs  — all 16 expander pins live
+//   2. CRSF 1k resistor — is the series resistor on the CRSF wire fitted?
+bool debugModeRequested() { return toggleOn(TOGGLE3) && toggleOn(TOGGLE4) && toggleOn(TOGGLE5); }
 
-void mcpDebugLoop() {
+// Polled by every tool each tick: handles the BOOT exit and returns the tool step from a
+// fresh pitch-stick push (+1 next, -1 previous, 0 stay).
+int debugNav() {
+  static bool prev_up = false, prev_dn = false;
+  if (digitalRead(PIN_BOOT_BTN) == LOW) {  // exit: reboot back into the normal flow
+    Serial.println("[debug] BOOT pressed - rebooting");
+    doReboot();  // does not return
+  }
+  RawKeys k = readRawKeys();
+  int step = 0;
+  if (k.down && !prev_dn) step = 1;
+  else if (k.up && !prev_up) step = -1;
+  prev_up = k.up;
+  prev_dn = k.down;
+  return step;
+}
+
+// Clear the screen and draw a tool's title + the shared navigation hint. Landscape keeps
+// the right end of the header line free for the tool's own status; portrait puts the
+// hint in a two-line footer.
+void debugHeader(const char* title) {
+  tft.fillScreen(COL_BG);
+  tft.setTextPadding(0);
+  tft.setTextDatum(ML_DATUM);
+  tft.setTextColor(TFT_YELLOW, COL_BG);
+  tft.drawString(title, PORTRAIT ? 2 : 4, 5, 1);
+  tft.setTextColor(TFT_DARKGREY, COL_BG);
+  if (PORTRAIT) {
+    tft.drawString("PITCH = next", 2, LCD_H - 20, 1);
+    tft.drawString("BOOT = exit", 2, LCD_H - 9, 1);
+  } else {
+    tft.drawString("PIT:next BOOT:exit", 104, 5, 1);
+  }
+}
+
+// Tool 1: all 16 MCP23017 inputs (A0-A7, B0-B7) live. A cell turns green while its pin
+// is triggered (pulled to GND) and keeps a white outline once it has been seen changing,
+// so a pin that works only intermittently still leaves a mark. Each cell also names the
+// toggle assigned to that pin. Raw states only (toggle invert is not applied). Changes
+// are logged to serial. Returns the tool step.
+int mcpDebugTool() {
   // Landscape: port A on the top row, port B below, pins 0-7 left to right.
   // Portrait: port A in the left column, port B right, pins 0-7 top to bottom.
   constexpr int CW = PORTRAIT ? 37 : 35, CH = PORTRAIT ? 28 : 31;  // cell pitch
   constexpr int X0 = PORTRAIT ? 1 : 2, Y0 = PORTRAIT ? 30 : 13;
 
-  crsf_set_output(false);  // bench mode: no throttle gate ran, so keep the link silent
-  pinMode(PIN_BOOT_BTN, INPUT_PULLUP);  // polled here (pocket's menu ISR is irrelevant now)
-  Serial.println("[mcpdbg] MCP23017 debug mode (BOOT button = reboot/exit)");
-
-  tft.fillScreen(COL_BG);
-  tft.setTextPadding(0);
-  tft.setTextDatum(ML_DATUM);
-  tft.setTextColor(TFT_YELLOW, COL_BG);
-  tft.drawString(lp("MCP23017 DEBUG", "MCP DEBUG"), PORTRAIT ? 2 : 4, 5, 1);
-  tft.setTextColor(TFT_DARKGREY, COL_BG);
-  if (PORTRAIT) {
-    tft.drawString("BOOT button", 2, LCD_H - 20, 1);
-    tft.drawString("= exit", 2, LCD_H - 9, 1);
-  } else {
-    tft.drawString("BOOT=exit", 110, 5, 1);
-  }
+  debugHeader(lp("MCP23017", "MCP INPUTS"));
 
   // Toggle number assigned to each MCP bit (0 = none), from the current pin map.
   uint8_t bit_toggle[16] = {0};
@@ -2268,12 +2299,97 @@ void mcpDebugLoop() {
     last = bits;
     last_valid = valid;
     first = false;
-    if (digitalRead(PIN_BOOT_BTN) == LOW) {  // exit: reboot back into the normal flow
-      Serial.println("[mcpdbg] BOOT pressed - rebooting");
-      doReboot();  // does not return
-    }
+    if (int step = debugNav()) return step;
     vTaskDelay(pdMS_TO_TICKS(20));  // matches the 50 Hz switch poll
   }
+}
+
+// Tool 2: CRSF wire check — is the 1k series resistor (GPIO17 -> CRSF pad) fitted?
+// Re-runs crsf_wire_test() once a second so a board can be probed/reworked live; the
+// screen and serial log update only when the result changes. See crsf.h for what the
+// three probes mean and why "OK" is a range, not a measurement. Returns the tool step.
+int crsfWireTool() {
+  struct Text {
+    const char* land;     // landscape verdict (one line, font 4)
+    const char* port[2];  // portrait verdict (two lines, font 2)
+    const char* why;      // landscape explanation (one line, font 1)
+    const char* whyp[3];  // portrait explanation (<= 12 chars per line)
+    uint16_t col;
+  };
+  static const Text TEXT[] = {
+      {"1K OK", {"1K", "OK"}, "TX->pad path present, not a short (~300R..10k)",
+       {"path present", "not shorted", "~300R..10k"}, TFT_GREEN},
+      {"1K MISSING", {"1K", "MISSING"}, "RX does not follow TX: resistor missing / open",
+       {"RX does not", "follow TX:", "R missing"}, TFT_RED},
+      {"1K SHORTED", {"1K", "SHORTED"}, "TX and RX fight: resistor bridged (0 ohm)",
+       {"TX/RX fight:", "R bridged", "(0 ohm)"}, TFT_RED},
+      {"LINE HELD LOW", {"LINE", "HELD LOW"}, "stuck LOW: short to GND / module unpowered",
+       {"pad stuck LO", "GND short or", "module off"}, TFT_RED},
+      {"LINE BUSY", {"LINE", "BUSY"}, "readings unstable: module transmitting?",
+       {"unstable:", "module is", "talking?"}, TFT_YELLOW},
+  };
+
+  debugHeader(lp("CRSF 1K", "CRSF 1K RES"));
+
+  int last_sig = -1;
+  for (int tick = 0;; ++tick) {
+    if (tick % 50 == 0) {  // ~1 Hz
+      CrsfWireTest r = crsf_wire_test();
+      int sig = (int)r.verdict << 6 | r.idle_pu << 5 | r.idle_pd << 4 | r.loop_hi << 3 |
+                r.loop_lo << 2 | r.hold_a << 1 | r.hold_b;
+      if (sig != last_sig) {
+        last_sig = sig;
+        const Text& t = TEXT[(int)r.verdict];
+        Serial.printf("[crsfdbg] %s  idle pu=%d pd=%d  loop hi=%d lo=%d  hold a=%d b=%d\n",
+                      t.land, r.idle_pu, r.idle_pd, r.loop_hi, r.loop_lo, r.hold_a, r.hold_b);
+        char b[48];
+        tft.setTextPadding(0);
+        if (PORTRAIT) {
+          tft.fillRect(0, 12, LCD_W, LCD_H - 12 - 28, COL_BG);  // body, above the footer
+          tft.setTextDatum(MC_DATUM);
+          tft.setTextColor(t.col, COL_BG);
+          tft.drawString(t.port[0], LCD_W / 2, 44, 2);
+          tft.drawString(t.port[1], LCD_W / 2, 64, 2);
+          tft.setTextDatum(ML_DATUM);
+          tft.setTextColor(TFT_WHITE, COL_BG);
+          for (int i = 0; i < 3; ++i) tft.drawString(t.whyp[i], 2, 92 + i * 12, 1);
+          const char* const NAME[6] = {"idle pu", "idle pd", "loop hi",
+                                       "loop lo", "hold a",  "hold b"};
+          const bool val[6] = {r.idle_pu, r.idle_pd, r.loop_hi, r.loop_lo, r.hold_a, r.hold_b};
+          tft.setTextColor(TFT_CYAN, COL_BG);
+          for (int i = 0; i < 6; ++i) {
+            snprintf(b, sizeof(b), "%-8s %d", NAME[i], val[i]);
+            tft.drawString(b, 2, 144 + i * 12, 1);
+          }
+        } else {
+          tft.fillRect(0, 12, LCD_W, LCD_H - 12, COL_BG);
+          tft.setTextDatum(MC_DATUM);
+          tft.setTextColor(t.col, COL_BG);
+          tft.drawString(t.land, LCD_W / 2, 30, 4);
+          tft.setTextDatum(ML_DATUM);
+          tft.setTextColor(TFT_WHITE, COL_BG);
+          tft.drawString(t.why, 4, 54, 1);
+          snprintf(b, sizeof(b), "idle pu=%d pd=%d  loop hi=%d lo=%d  hold a=%d b=%d", r.idle_pu,
+                   r.idle_pd, r.loop_hi, r.loop_lo, r.hold_a, r.hold_b);
+          tft.setTextColor(TFT_CYAN, COL_BG);
+          tft.drawString(b, 4, 67, 1);
+        }
+      }
+    }
+    if (int step = debugNav()) return step;
+    vTaskDelay(pdMS_TO_TICKS(20));
+  }
+}
+
+void debugLoop() {
+  crsf_set_output(false);  // bench mode: no throttle gate ran, so keep the link silent
+  pinMode(PIN_BOOT_BTN, INPUT_PULLUP);  // polled here (pocket's menu ISR is irrelevant now)
+  Serial.println("[debug] debug mode (pitch = next tool, BOOT button = reboot/exit)");
+
+  int (*const TOOLS[])() = {mcpDebugTool, crsfWireTool};
+  constexpr int TOOL_N = sizeof(TOOLS) / sizeof(TOOLS[0]);
+  int tool = 0;
+  for (;;) tool = (tool + TOOLS[tool]() + TOOL_N) % TOOL_N;
 }
 
 // RC screen loop — runs while menu mode is off; returns when it comes on.
@@ -2344,13 +2460,15 @@ void appTask(void*) {
     }
   }
 
-  // Toggle3+4+5 all ON at power-up: MCP23017 input debug screen (does not return).
-  // Checked before the Toggle5 calibration trigger, which the combo would also satisfy.
-  if (mcpDebugRequested()) mcpDebugLoop();
+  // Stored calibration first: the debug tools navigate with the (calibrated) pitch stick.
+  bool have_cal = storage_load_cal(g_cal);
+
+  // Toggle3+4+5 all ON at power-up: debug mode (does not return). Checked before the
+  // Toggle5 calibration trigger, which the combo would also satisfy.
+  if (debugModeRequested()) debugLoop();
 
   // Toggle5 ON at power-up forces a fresh calibration; otherwise use the stored one.
   // First boot (nothing stored) always calibrates.
-  bool have_cal = storage_load_cal(g_cal);
   if (toggleOn(TOGGLE5) || !have_cal) {
     calibrationWizard();
   } else {
