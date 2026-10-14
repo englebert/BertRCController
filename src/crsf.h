@@ -8,6 +8,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "storage.h"  // ElrsSetting
+
 struct CrsfLink {
   bool valid;          // at least one valid telemetry frame received from the module
   uint32_t tx_frames;  // RC frames we have sent
@@ -28,6 +30,29 @@ struct CrsfLink {
   uint32_t batt_mah;   // used capacity (mAh)
   uint8_t batt_pct;    // battery remaining (%)
 };
+
+// ELRS Lua parameter field ids used for blind writes (ELRS 3.4.x registration order;
+// 3.5.x+ inserts "Link Mode" and shifts the later ones — see CLAUDE.md).
+constexpr int CRSF_FIELD_PKT_RATE = 1;
+constexpr int CRSF_FIELD_SWITCH_MODE = 3;
+constexpr int CRSF_FIELD_MAX_POWER = 6;
+constexpr int CRSF_FIELD_FAN = 8;
+
+// Settings to re-send to the module after boot (index = ElrsSetting, 0xFF = skip). Call
+// before crsf_start(). Once the module first answers (it has locked our baud) — or after
+// 3 s regardless — the CRSF task writes them one at a time in the order packet rate,
+// switch mode, TX power, fan, spaced so each lands on its own quiet-wire hold.
+void crsf_set_restore(const uint8_t values[ELRS_SETTING_N]);
+
+// Put the TX module into bind mode: sends the CRSF command frame (0x32, sub-command CRSF /
+// BIND) that EdgeTX's "Bind" button uses for ELRS modules. Fire-and-forget, queued like a
+// parameter write (RC held for a few ticks). The receiver must be in bind mode too, and
+// the module refuses while it is connected to a receiver. Not needed with a binding phrase.
+// Software bind: if a receiver is linked, tells it to enter bind mode (relayed over the
+// air), then puts the module into bind until the receiver links again. Non-blocking.
+enum CrsfBindState { BIND_IDLE, BIND_SCAN, BIND_RX, BIND_TX, BIND_DONE, BIND_FAILED };
+void crsf_bind();
+int crsf_bind_state();
 
 // Map the CRSF TX-power index to milliwatts (0 for unknown index).
 uint16_t crsf_tx_power_mw(uint8_t idx);

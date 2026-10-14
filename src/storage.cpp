@@ -132,13 +132,18 @@ void storage_set_telem_sel(uint16_t v) {
   if (g_open) prefs.putUShort(KEY_TELEM_SEL, v);
 }
 
-uint8_t storage_get_fan_thresh() {
-  if (!g_open) return 0xFF;
-  return prefs.getUChar(KEY_FAN_THRESH, 0xFF);
+// NVS key per ElrsSetting (the fan keeps its original key so a stored value carries over).
+constexpr const char* KEY_ELRS[ELRS_SETTING_N] = {"elrspkt", "elrsswm", "elrspwr",
+                                                  KEY_FAN_THRESH};
+
+uint8_t storage_get_elrs(ElrsSetting s) {
+  if (!g_open || s >= ELRS_SETTING_N) return 0xFF;
+  if (!prefs.isKey(KEY_ELRS[s])) return 0xFF;  // never saved: no NVS error log
+  return prefs.getUChar(KEY_ELRS[s], 0xFF);
 }
 
-void storage_set_fan_thresh(uint8_t v) {
-  if (g_open) prefs.putUChar(KEY_FAN_THRESH, v);
+void storage_set_elrs(ElrsSetting s, uint8_t v) {
+  if (g_open && s < ELRS_SETTING_N) prefs.putUChar(KEY_ELRS[s], v);
 }
 
 uint32_t storage_get_crsf_baud() {

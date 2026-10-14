@@ -122,6 +122,56 @@ UART0 pins 1/3 · display MISO (panel is write-only).
 - **Packet rate:** 0x2D write to field **1**, value = list index (no shift). SX1280 options:
   0=50Hz,1=100Full,2=150,3=250,4=333Full,5=500,6=D250,7=D500,8=F500,9=F1000. Verify via
   telemetry **rf_Mode** (LinkStatistics byte 6 = enum_rate: {2,4,5,7,8,9,10,11,12,13} per index).
+- **Switch mode / channel count:** ELRS only carries **CH1–12** over the air in its normal
+  switch modes (Wide/Hybrid), so toggles mapped to CH13–16 (default Toggle9/10) never reach
+  the receiver. All 16 need a FULL packet rate (100Hz FULL / 333Hz FULL) **and** Switch Mode
+  "16ch Rate/2". SWITCH MODE menu = blind 0x2D write to field **3** (ELRS 3.4.x), value =
+  option index: normal rates {0 Wide, 1 Hybrid}, FULL rates {0 8ch, 1 16ch Rate/2, 2 12ch
+  Mixed}. No read-back; the module ignores the change while a receiver is connected.
+  (Field id and option order are from the ELRS source as recalled — not yet verified live.)
+- **Bind:** CRSF MODULE → BIND RECEIVER runs `crsf_bind()`, a non-blocking state machine
+  (`bindStep()` in the CRSF task). Frame: CRSF command (type **0x32**, origin 0xEA,
+  `0x10 0x01` = CRSF/BIND, inner CRC poly **0xBA**, then the frame CRC). ELRS 3.4 facts:
+  the bind command to the **module** (dest 0xEE) only makes it broadcast its UID for
+  ~0.3 s (6 bind packets, then it exits) — the RX must already be listening in bind mode.
+  Sent to the **receiver** (dest 0xEC), the module relays it over the air and a linked RX
+  drops into bind mode (ELRS `lua.cpp`; EdgeTX does the same when telemetry is live). So:
+  link up → RX bind every 300 ms until the link drops (≤5 s) → module bind ×(up to 4, 2.5 s
+  apart) until link stats return. Row shows .. / RX.. / TX.. / OK / FAIL; log `[crsf] bind: ...`.
+  With no link, put the RX in bind mode by hand (3× power-cycle) first.
+  **Module bind on ELRS < 3.4:** the CRSF bind command only exists from 3.4.0 — this
+  handset's module reports **ELRS 3.0.0** and silently ignores it. Every version has a
+  "Bind" COMMAND in its Lua menu, clicked by a 0x2D write of 1 (lcsClick); its field id is
+  build-dependent, so the first bind per boot reads fields 1..N (PARAM_READ 0x2C, chunk 0,
+  interleaved with RC) and matches the PARAM_ENTRY (0x2B) named "Bind" (type 0x0D). Falls
+  back to the CRSF command if not found. The RX-first step needs ELRS >= 3.4 on the RX too.
+- **Module identity at boot:** a device ping goes out right after the model ID; the
+  DEVICE_INFO reply is logged as `[crsf] module: '<name>' ELRS x.y.z, N params`. Pings and
+  param reads DO get answered now that frames are synced to the module (the old "discovery
+  never replies" note predates sync). Field ids in this file were derived from 3.4.x source;
+  3.0.0's Lua registration order for the fields we write (1/3/6/8) is the same.
+- **Module settings are re-sent at every boot.** PACKET RATE, SWITCH MODE, TX POWER and FAN
+  choices are stored in NVS (`storage_get/set_elrs`, keys `elrspkt`/`elrsswm`/`elrspwr`/
+  `fanthr`) and the CRSF task writes them back to the module once it first answers (or
+  after 3 s), one at a time: rate → switch mode → power → fan (`restoreStep()` in
+  `crsf.cpp`). Never-set settings are skipped. The menus' cyan marker = the stored value.
+- **Model ID at boot:** first thing in `restoreStep()`, before the settings, the handset
+  sends the CRSF model-select command (0x32, `0x10 0x05 <id>`, same inner-CRC framing as
+  bind) with `MODEL_ID = 0`, as EdgeTX does. ELRS (3.4 `tx_main.cpp`) holds RF in
+  `awaitingModelId` until a model ID arrives or a timeout passes, and keeps rate/power/
+  switch-mode **per model ID** — 0 is the slot the module used when none was sent, so the
+  stored settings stay where they were. Model Match on the RX compares against this ID.
+- **Module reset -> re-send:** if the module goes silent > 500 ms and then talks again
+  (its own power blip/reboot — it has a separate supply), the model ID and stored settings
+  are sent again, as EdgeTX does (`MODULE_ALIVE_TIMEOUT`); otherwise it would come back on
+  model 0 with RF held. Logged as `[crsf] module came back ...`.
+- **Frame pacing follows the module (EdgeTX mixer sync):** the module streams 0x3A
+  OpenTX-sync frames `[0xEA][origin][0x10][interval u32][offset s32]` (0.1 us units). The
+  CRSF task is driven by a us `esp_timer` (not the 1 ms tick) with period = interval + lag,
+  lag consumed once (EdgeTX `getAdjustedRefreshRate`), so each RF packet gets fresh
+  channels. Fixed 250 Hz fallback when no sync within 2 s; param-write/command slots keep
+  the fixed 4 ms spacing. Unsynced at 333Hz+ the module flagged every frame late and spammed
+  ~80 sync frames/s; synced it's back to ~5-9/s with lag within +-250 us.
 - **Baud (CRSF wire):** ELRS 3.4.x has **no CRSF baud-set command** (speed-proposal frames are
   dropped). Change our own `Serial2` baud (400000/921600) → the module's autobaud re-locks in
   ~1-2 s (it re-detects on any bad-packet/disconnect, not just power-on). Persisted in NVS,
@@ -213,7 +263,7 @@ deadband freezes what's left. All four knobs are constants at the top of `gimbal
 | Task | Core | Priority | Behavior |
 |------|------|----------|----------|
 | Gimbal sampling | 1 | highest | polls 4x analogRead() per ~1ms tick, filters, publishes |
-| CRSF / ELRS | 0 | medium | TX 250–500 Hz, independent of sample rate |
+| CRSF / ELRS | 0 | medium | TX at the module's packet rate (0x3A sync), 250 Hz fallback |
 | Display / UI | 0 | low | redraws at ~10–30 Hz |
 
 - Gimbal task: poll `analogRead()` for each of the 4 pins per tick → median+EMA filter

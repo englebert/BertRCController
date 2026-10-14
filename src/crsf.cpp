@@ -3,20 +3,31 @@
 
 #include <Arduino.h>
 #include <driver/gpio.h>
+#include <esp_timer.h>
 
 #include "gconfig.h"
 #include "gimbals.h"
 #include "pins.h"
 #include "switches.h"
 
+void queueParamWrite(int field, int value);  // fwd decl (defined below, file scope)
+
 namespace {
 
 constexpr uint32_t CRSF_BAUD_DEFAULT = 921600;  // unlocks 500Hz/F1000 (400k caps at 333Hz)
-// 250 Hz, not 500: our vTaskDelayUntil runs on the 1 ms tick, so at a 2 ms (500 Hz)
-// period the ±1 ms jitter collides with the module's telemetry and drops the link
-// intermittently. 250 Hz (4 ms) has enough margin to be rock-solid. The module
-// still RF-transmits at its own rate, reusing the latest channels.
-constexpr int TX_RATE_HZ = 250;
+// Frame pacing. The module streams OpenTX-sync frames (0x3A) carrying its RF packet
+// interval and how early our frames land before each RF packet; like EdgeTX's mixer
+// scheduler we follow them (period = interval + lag, lag consumed once) so every RF
+// packet carries fresh channels. A µs esp_timer drives the task (the 1 ms FreeRTOS tick
+// was too coarse: ±1 ms jitter at 2 ms collided with the module's telemetry window).
+// Without valid sync (none yet, or > 2 s old) we fall back to a fixed 250 Hz.
+constexpr uint32_t FALLBACK_PERIOD_US = 4000;  // 250 Hz
+constexpr uint32_t MIN_PERIOD_US = 850;        // EdgeTX MIN_REFRESH_RATE
+constexpr uint32_t MAX_PERIOD_US = 50000;      // EdgeTX MAX_REFRESH_RATE
+constexpr uint32_t SYNC_VALID_MS = 2000;
+// Module considered reset when it has been silent this long and then talks again; the
+// model ID and stored settings are then re-sent (EdgeTX MODULE_ALIVE_TIMEOUT).
+constexpr uint32_t MODULE_ALIVE_TIMEOUT_MS = 500;
 
 // CRSF addressing / frame types.
 constexpr uint8_t ADDR_MODULE = 0xEE;  // CRSF transmitter (our destination)
@@ -32,11 +43,16 @@ constexpr uint8_t TYPE_DEVICE_INFO = 0x29;      // reply to ping: module name + 
 constexpr uint8_t TYPE_PARAM_ENTRY = 0x2B;      // reply to a param read (chunked)
 constexpr uint8_t TYPE_PARAM_READ = 0x2C;       // request one param entry (by field + chunk)
 constexpr uint8_t TYPE_PARAM_WRITE = 0x2D;      // Lua parameter write (e.g. set TX power)
+constexpr uint8_t TYPE_COMMAND = 0x32;          // CRSF command frame (inner CRC, poly 0xBA)
+constexpr uint8_t CMD_CRSF = 0x10;              // command class: CRSF
+constexpr uint8_t CMD_CRSF_BIND = 0x01;         // CRSF sub-command: enter bind mode
+constexpr uint8_t CMD_CRSF_MODEL_ID = 0x05;     // CRSF sub-command: select model ID (1 arg)
+constexpr uint8_t MODEL_ID = 0;  // the model we announce; ELRS keeps its settings per model ID
 constexpr uint8_t ADDR_BROADCAST = 0x00;
 
 // "Max Power" Lua field ID (ELRS_POWER_COMMAND). Verified on the Nano TX V2. ELRS assigns
 // field IDs by registration order, so a different firmware/module may need another value.
-constexpr uint8_t POWER_FIELD_ID = 6;
+constexpr uint8_t POWER_FIELD_ID = CRSF_FIELD_MAX_POWER;
 
 // CRSF 11-bit channel range: 172=min, 992=center, 1811=max.
 constexpr uint16_t CRSF_MIN = 172;
@@ -48,6 +64,30 @@ TaskHandle_t g_task = nullptr;
 uint32_t g_crsf_baud = CRSF_BAUD_DEFAULT;  // active UART baud (module auto-detects it)
 volatile bool g_tx_enabled = true;  // false = stop transmitting RC (module fails safe)
 
+// Boot-time restore of the module settings (crsf_set_restore). Single-writer: the task.
+uint8_t g_restore[ELRS_SETTING_N] = {0xFF, 0xFF, 0xFF, 0xFF};
+int g_restore_next = 0;      // position in RESTORE_ORDER
+uint32_t g_restore_due = 0;  // millis() the next write may go out; 0 = not started yet
+uint32_t g_start_ms = 0;     // millis() at crsf_start()
+// Task-local (single writer: the CRSF task).
+uint32_t g_sync_rate_us = 0;  // module RF packet interval from 0x3A, 0 = none yet
+int32_t g_sync_lag_us = 0;    // remaining lag to absorb into the next period
+uint32_t g_sync_ms = 0;       // millis() of the last 0x3A timing frame
+uint32_t g_last_rx_ms = 0;    // millis() of the last valid frame from the module
+bool g_module_alive = false;
+uint32_t g_ping_due = 0;      // millis() to send one device ping, 0 = none
+int g_bind_field = 0;   // module Lua field id of its "Bind" command, 0 = not found yet
+int g_param_count = 0;  // module's Lua field count (from DEVICE_INFO), 0 = unknown
+int g_read_field = -1;  // queued param read (field id), -2 = device ping, -1 = none
+esp_timer_handle_t g_tick_timer = nullptr;
+// Packet rate first: switch-mode option indices are only meaningful for the rate in force.
+constexpr ElrsSetting RESTORE_ORDER[] = {ELRS_PKT_RATE, ELRS_SWITCH_MODE, ELRS_TX_POWER,
+                                         ELRS_FAN};
+constexpr int RESTORE_FIELD[ELRS_SETTING_N] = {CRSF_FIELD_PKT_RATE, CRSF_FIELD_SWITCH_MODE,
+                                               CRSF_FIELD_MAX_POWER, CRSF_FIELD_FAN};
+constexpr const char* RESTORE_NAME[ELRS_SETTING_N] = {"packet rate", "switch mode",
+                                                      "TX power", "fan"};
+
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 CrsfLink g_link = {};
 uint16_t g_channels[16] = {0};  // last sent channel values, guarded by g_mux
@@ -56,22 +96,29 @@ uint32_t g_linkstats_ms = 0;  // millis() of the last link-stats frame (g_mux)
 int g_power_idx = 0;      // pending param write value (g_mux)
 int g_power_repeat = 0;   // remaining times to resend the queued write (g_mux)
 int g_write_field = 6;    // param field id for the queued write (6 = Max Power)
+int g_cmd_repeat = 0;     // remaining sends of the queued command (g_mux)
+uint8_t g_cmd_dest = 0;   // queued command's destination address (g_mux)
+uint8_t g_cmd_sub = 0;    // queued command's CRSF sub-command (g_mux)
+int g_cmd_arg = -1;       // queued command's argument byte, -1 = none (g_mux)
 // Diagnostic: ping the module + tally/log RX frame types to serial. Left off — testing
 // showed the module streams sync (0x3A) but never answers device pings (0x29) on this
 // half-duplex link, so the CRSF param/command path (incl. WiFi trigger) isn't available;
 // use the no-packets timeout instead. Flip to true to re-run the probe.
 bool g_probe = false;
 
-uint8_t crc8_dvb_s2(const uint8_t* data, int len) {
+uint8_t crc8_poly(const uint8_t* data, int len, uint8_t poly) {
   uint8_t crc = 0;
   for (int i = 0; i < len; ++i) {
     crc ^= data[i];
     for (int b = 0; b < 8; ++b) {
-      crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ 0xD5) : (uint8_t)(crc << 1);
+      crc = (crc & 0x80) ? (uint8_t)((crc << 1) ^ poly) : (uint8_t)(crc << 1);
     }
   }
   return crc;
 }
+
+// Frame CRC (DVB-S2, poly 0xD5).
+uint8_t crc8_dvb_s2(const uint8_t* data, int len) { return crc8_poly(data, len, 0xD5); }
 
 // Pack 16 x 11-bit channels little-endian into 22 bytes (standard CRSF layout).
 void packChannels(const uint16_t ch[16], uint8_t out[22]) {
@@ -162,6 +209,39 @@ uint16_t g_pc_sync = 0, g_pc_link = 0, g_pc_echo = 0, g_pc_info = 0, g_pc_other 
 // Send a CRSF parameter write to the module's "Max Power" field. value = power index
 // (0=10mW,1=25,2=50,3=100,4=250,5=500,6=1000,7=2000), assuming the module's min power is
 // 10 mW. No device discovery needed — the module acts on the write immediately.
+// CRSF command to the TX module: bind (crsf_bind) or model-ID select (sent at boot, as
+// EdgeTX does). arg < 0 = no argument byte. Command frames carry an inner CRC (poly 0xBA)
+// over type..payload ahead of the normal frame CRC.
+void sendCommand(uint8_t dest, uint8_t sub, int arg) {
+  while (uart.available()) uart.read();  // drain RX (echo/telemetry) first
+  uint8_t f[10];
+  int n = 0;
+  f[n++] = ADDR_MODULE;
+  f[n++] = 0;  // length, filled below
+  f[n++] = TYPE_COMMAND;
+  f[n++] = dest;        // the TX module, or the receiver (relayed over the air)
+  f[n++] = ADDR_RADIO;  // origin: us
+  f[n++] = CMD_CRSF;
+  f[n++] = sub;
+  if (arg >= 0) f[n++] = (uint8_t)arg;
+  f[n] = crc8_poly(&f[2], n - 2, 0xBA);
+  n++;
+  f[n] = crc8_dvb_s2(&f[2], n - 2);
+  n++;
+  f[1] = n - 2;  // type .. frame crc
+  uart.write(f, n);
+  uart.flush();
+}
+
+void queueCommand(uint8_t dest, uint8_t sub, int arg, int repeat) {
+  portENTER_CRITICAL(&g_mux);
+  g_cmd_dest = dest;
+  g_cmd_sub = sub;
+  g_cmd_arg = arg;
+  g_cmd_repeat = repeat;
+  portEXIT_CRITICAL(&g_mux);
+}
+
 void sendPowerWrite(uint8_t value) {
   while (uart.available()) uart.read();  // drain RX (echo/telemetry) before the write
   uint8_t f[8];
@@ -185,21 +265,66 @@ bool isKnownAddr(uint8_t a) {
   return a == ADDR_MODULE || a == ADDR_RADIO || a == ADDR_FC || a == ADDR_RX;
 }
 
+// Link-stats RSSI byte -> dBm. The CRSF spec sends "dBm * -1" (positive), but ELRS puts
+// the negative dBm in the byte as an int8 (e.g. 0xD6 = -42 dBm). Accept both.
+int16_t rssiDbm(uint8_t b) {
+  int8_t v = (int8_t)b;
+  return v < 0 ? v : -v;
+}
+
 void handleFrame(uint8_t type, const uint8_t* payload, int plen) {
   if (type == TYPE_RC_CHANNELS) return;  // echo of our own TX on the shared wire
+  g_last_rx_ms = millis();
+
+  // DEVICE_INFO (ping reply): [dest][origin][name\0][serial4][hw4][sw4][field count][ver].
+  if (type == TYPE_DEVICE_INFO && plen > 2) {
+    int n = strnlen((const char*)&payload[2], plen - 2);
+    int o = 2 + n + 1;
+    if (o + 14 <= plen) {
+      int cnt = payload[o + 12];
+      if (cnt != g_param_count)
+        Serial.printf("[crsf] module: '%.*s' ELRS %u.%u.%u, %d params\n", n, (const char*)&payload[2],
+                      payload[o + 9], payload[o + 10], payload[o + 11], cnt);
+      g_param_count = cnt;
+    }
+  }
+  // PARAM_ENTRY chunk 0: [dest][origin][field][chunks left][parent][type][name\0]...
+  if (type == TYPE_PARAM_ENTRY && plen > 7 && payload[0] == ADDR_RADIO) {
+    const char* name = (const char*)&payload[6];
+    if ((payload[5] & 0x3F) == 0x0D && strnlen(name, plen - 6) == 4 && !strncmp(name, "Bind", 4)) {
+      if (g_bind_field != payload[2]) Serial.printf("[crsf] module Bind = field %u\n", payload[2]);
+      g_bind_field = payload[2];
+    }
+  }
+
+  // OpenTX sync: [dest 0xEA][origin][0x10][rate u32 BE][offset s32 BE], both in 0.1 us.
+  if (type == TYPE_RADIO_ID && plen >= 11 && payload[0] == ADDR_RADIO && payload[2] == 0x10) {
+    uint32_t rate = ((uint32_t)payload[3] << 24 | (uint32_t)payload[4] << 16 |
+                     (uint32_t)payload[5] << 8 | payload[6]) / 10;
+    int32_t lag = (int32_t)((uint32_t)payload[7] << 24 | (uint32_t)payload[8] << 16 |
+                            (uint32_t)payload[9] << 8 | payload[10]) / 10;
+    if (rate > 0) {
+      if (rate < MIN_PERIOD_US) rate = rate * (MIN_PERIOD_US / (rate + 1));  // as EdgeTX
+      if (rate > MAX_PERIOD_US) rate = MAX_PERIOD_US;
+      if (rate != g_sync_rate_us) Serial.printf("[crsf] module sync: %lu us/frame\n", (unsigned long)rate);
+      g_sync_rate_us = rate;
+      g_sync_lag_us = lag;
+      g_sync_ms = millis();
+    }
+  }
 
   portENTER_CRITICAL(&g_mux);
   g_link.rx_frames++;
   if (type == TYPE_LINK_STATISTICS && plen >= 10) {
     // CRSF LinkStatistics: [0]up RSSI ant1 [1]ant2 [2]up LQ [3]up SNR [4]active ant
     // [5]RF mode [6]up TX power idx [7]dn RSSI [8]dn LQ [9]dn SNR.
-    g_link.up_rssi = -(int16_t)payload[0];  // uplink RSSI (dBm)
+    g_link.up_rssi = rssiDbm(payload[0]);   // uplink RSSI (dBm)
     g_link.up_lq = payload[2];              // uplink link quality (%)
     g_link.up_snr = (int8_t)payload[3];
     g_link.ant = payload[4];
     g_link.rf_mode = payload[5];
     g_link.tx_power = payload[6];
-    g_link.dn_rssi = -(int16_t)payload[7];
+    g_link.dn_rssi = rssiDbm(payload[7]);
     g_link.dn_lq = payload[8];
     g_link.dn_snr = (int8_t)payload[9];
     g_link.valid = true;
@@ -225,7 +350,7 @@ void handleFrame(uint8_t type, const uint8_t* payload, int plen) {
     if (type != TYPE_LINK_STATISTICS && type != TYPE_RADIO_ID &&
         type != TYPE_DEVICE_PING && type != TYPE_RC_CHANNELS) {
       Serial.printf("[probe] rx type=0x%02X len=%d:", type, plen);
-      for (int i = 0; i < plen && i < 24; ++i) Serial.printf(" %02X", payload[i]);
+      for (int i = 0; i < plen && i < 64; ++i) Serial.printf(" %02X", payload[i]);
       Serial.println();
       if (type == TYPE_DEVICE_INFO && plen > 2)
         Serial.printf("[probe] >>> DEVICE INFO — module name: '%s'\n", (const char*)&payload[2]);
@@ -357,10 +482,150 @@ int paramReadEntry(uint8_t field, uint8_t* data, int maxlen) {
   return -1;
 }
 
+// Called every task tick. Once the module first answers (it has locked our baud) or after
+// 3 s, whichever comes first: announce our model ID (ELRS holds RF until a handset sends
+// one, and keeps its settings per model), then queue the next stored setting each time the
+// previous write has gone out and its spacing has elapsed.
+void restoreStep() {
+  if (!g_tx_enabled) return;
+  uint32_t now = millis();
+
+  // Module reset (power blip, its own reboot, WiFi exit): silent > 500 ms, then back.
+  // It comes back on model 0 with RF held for a model ID — re-announce and re-restore.
+  bool heard = g_last_rx_ms != 0 && now - g_last_rx_ms <= MODULE_ALIVE_TIMEOUT_MS;
+  if (g_module_alive && !heard) {
+    g_module_alive = false;
+  } else if (!g_module_alive && heard) {
+    g_module_alive = true;
+    if (g_restore_due != 0) {  // not the first contact after boot
+      Serial.println("[crsf] module came back — re-sending model ID + settings");
+      g_restore_next = 0;
+      g_restore_due = 0;
+    }
+  }
+  portENTER_CRITICAL(&g_mux);
+  uint32_t rx = g_link.rx_frames;
+  bool busy = g_power_repeat > 0 || g_cmd_repeat > 0;
+  portEXIT_CRITICAL(&g_mux);
+  if (g_restore_due == 0) {
+    if (rx == 0 && now - g_start_ms < 3000) return;
+    queueCommand(ADDR_MODULE, CMD_CRSF_MODEL_ID, MODEL_ID, 3);
+    g_ping_due = now + 150;  // then ask who it is (logs name + ELRS version + field count)
+    Serial.printf("[crsf] model ID %u sent\n", MODEL_ID);
+    g_restore_due = now + 300;
+    return;
+  }
+
+  constexpr int N = sizeof(RESTORE_ORDER) / sizeof(RESTORE_ORDER[0]);
+  while (g_restore_next < N && g_restore[RESTORE_ORDER[g_restore_next]] == 0xFF)
+    g_restore_next++;  // skip settings never chosen
+  if (g_restore_next >= N) return;
+  if (busy || (int32_t)(now - g_restore_due) < 0) return;
+
+  ElrsSetting s = RESTORE_ORDER[g_restore_next++];
+  queueParamWrite(RESTORE_FIELD[s], g_restore[s]);
+  Serial.printf("[crsf] restore %s = %u\n", RESTORE_NAME[s], g_restore[s]);
+  // A packet-rate change re-inits the radio; give it longer before the next write.
+  g_restore_due = now + (s == ELRS_PKT_RATE ? 1000 : 400);
+}
+
+// Software bind (crsf_bind). Two module-side paths: ELRS >= 3.4 accepts the CRSF bind
+// command; ELRS 3.0-3.3 ignore it, but every version has a "Bind" command in its Lua menu,
+// "clicked" by a param write of 1 (lcsClick). Its field id depends on the build, so the
+// first bind reads the module's fields (PARAM_READ, interleaved with RC — replies only come
+// back in the window after each frame we send) and finds the one named "Bind".
+// The rest, the EdgeTX way. ELRS's module-side bind command only makes the
+// module broadcast its UID for ~0.3 s (6 bind packets, then it exits) — the receiver must
+// already be listening in bind mode. So: if a receiver is linked, first send the bind
+// command addressed to the RECEIVER (0xEC); the module relays it over the air and the RX
+// drops into bind mode (ELRS lua.cpp). Once the link drops, put the module into bind a
+// few times, spaced out, until the link comes back.
+volatile int g_bind_state = BIND_IDLE;
+int g_scan_field = 0;      // next field to read while looking for the Bind command
+uint32_t g_bind_t0 = 0, g_bind_next = 0;
+int g_bind_tries = 0;
+
+bool linkUp(uint32_t now, uint32_t maxAgeMs) {
+  portENTER_CRITICAL(&g_mux);
+  bool up = g_link.valid && now - g_linkstats_ms < maxAgeMs;
+  portEXIT_CRITICAL(&g_mux);
+  return up;
+}
+
+// Returns true while a bind is in progress (it owns the command slot).
+bool bindStep() {
+  int st = g_bind_state;
+  if (st != BIND_SCAN && st != BIND_RX && st != BIND_TX) return false;
+  uint32_t now = millis();
+  if (st == BIND_SCAN) {
+    int last = g_param_count > 0 ? g_param_count : 48;
+    if (g_bind_field || g_scan_field > last) {
+      if (!g_bind_field) Serial.println("[crsf] bind: no Bind field, using CRSF bind command");
+      bool linked = linkUp(now, 1000);
+      g_bind_state = linked ? BIND_RX : BIND_TX;  // a linked RX is told to bind first
+      g_bind_t0 = now;
+      g_bind_next = now;
+      g_bind_tries = 0;
+      Serial.printf("[crsf] bind: %s\n", linked ? "RX linked, RX first" : "module only");
+    } else if ((int32_t)(now - g_bind_next) >= 0) {
+      g_read_field = g_scan_field++;  // one read per 30 ms; reply arrives a frame or two later
+      g_bind_next = now + 30;
+    }
+    return true;
+  }
+  if (st == BIND_RX) {
+    if (!linkUp(now, 1000) || now - g_bind_t0 > 5000) {  // RX left the link (or ignored us)
+      Serial.printf("[crsf] bind: %s -> module bind\n",
+                    linkUp(now, 1000) ? "RX still linked" : "RX in bind mode");
+      g_bind_state = BIND_TX;
+      g_bind_t0 = now;
+      g_bind_next = now + 300;
+      g_bind_tries = 0;
+    } else if ((int32_t)(now - g_bind_next) >= 0) {
+      queueCommand(ADDR_RX, CMD_CRSF_BIND, -1, 1);
+      g_bind_next = now + 300;
+    }
+    return true;
+  }
+  // BIND_TX
+  if (g_bind_tries > 0 && linkUp(now, 500) && g_linkstats_ms - g_bind_t0 > 500) {
+    Serial.println("[crsf] bind: receiver linked");
+    g_bind_state = BIND_DONE;
+    return false;
+  }
+  if ((int32_t)(now - g_bind_next) >= 0) {
+    if (g_bind_tries >= 4) {
+      Serial.println("[crsf] bind: no receiver answered");
+      g_bind_state = BIND_FAILED;
+      return false;
+    }
+    if (g_bind_field)
+      queueParamWrite(g_bind_field, 1);  // "click" the module's Lua Bind command
+    else
+      queueCommand(ADDR_MODULE, CMD_CRSF_BIND, -1, 3);
+    g_bind_tries++;
+    Serial.printf("[crsf] bind: module bind #%d\n", g_bind_tries);
+    g_bind_next = now + 2500;
+  }
+  return true;
+}
+
+void tickCb(void*) { xTaskNotifyGive(g_task); }
+
+// Next frame period: the module's interval plus the outstanding lag (EdgeTX
+// ModuleSyncStatus::getAdjustedRefreshRate), or the fixed fallback.
+uint32_t nextPeriodUs() {
+  if (g_sync_rate_us == 0 || millis() - g_sync_ms > SYNC_VALID_MS) return FALLBACK_PERIOD_US;
+  int32_t p = (int32_t)g_sync_rate_us + g_sync_lag_us;
+  if (p < (int32_t)MIN_PERIOD_US) p = MIN_PERIOD_US;
+  if (p > (int32_t)MAX_PERIOD_US) p = MAX_PERIOD_US;
+  g_sync_lag_us -= p - (int32_t)g_sync_rate_us;
+  return (uint32_t)p;
+}
+
 void crsfTask(void*) {
-  const TickType_t period = pdMS_TO_TICKS(1000 / TX_RATE_HZ);  // 2 ms @ 500 Hz
-  TickType_t last = xTaskGetTickCount();
-  uint32_t frameCnt = 0;
+  int64_t next = esp_timer_get_time();
+  uint32_t probeMs = millis();
   for (;;) {
     // Pending TX-power write? Hold the RC stream for this tick and send the parameter
     // write on a quiet wire instead — interleaving it with RC channel frames corrupts
@@ -368,13 +633,40 @@ void crsfTask(void*) {
     portENTER_CRITICAL(&g_mux);
     int pwr = (g_power_repeat > 0) ? g_power_idx : -1;
     if (g_power_repeat > 0) g_power_repeat--;
+    int cmd = -1;  // a queued command (bind / model ID) goes out after any pending param write
+    int cmdArg = g_cmd_arg;
+    uint8_t cmdDest = g_cmd_dest;
+    if (pwr < 0 && g_cmd_repeat > 0) {
+      cmd = g_cmd_sub;
+      g_cmd_repeat--;
+    }
     portEXIT_CRITICAL(&g_mux);
+    if (pwr < 0 && cmd < 0 && g_ping_due && (int32_t)(millis() - g_ping_due) >= 0 &&
+        g_cmd_repeat == 0) {
+      g_ping_due = 0;
+      g_read_field = -2;  // sentinel: device ping in the read slot
+    }
+    if (pwr < 0 && cmd < 0 && !bindStep()) restoreStep();  // bind first; else model ID + settings
+    int rd = -1;
+    if (pwr < 0 && cmd < 0) {
+      rd = g_read_field;
+      g_read_field = -1;
+    }
+    bool ping = rd == -2;
 
+    bool special = pwr >= 0 || cmd >= 0 || rd >= 0 || ping;  // param write / command / read slot
     if (!g_tx_enabled) {
       // Output disabled from the menu: transmit nothing (module fails safe). Still drain
       // RX so telemetry/state stays current if the module is still sending.
     } else if (pwr >= 0) {
       sendPowerWrite((uint8_t)pwr);
+    } else if (cmd >= 0) {
+      sendCommand(cmdDest, (uint8_t)cmd, cmdArg);
+    } else if (ping) {
+      paramSendExt(TYPE_DEVICE_PING, ADDR_BROADCAST, nullptr, 0);
+    } else if (rd >= 0) {
+      uint8_t args[2] = {(uint8_t)rd, 0};  // field, chunk 0 (has the name)
+      paramSendExt(TYPE_PARAM_READ, ADDR_MODULE, args, 2);
     } else {
       sendRcFrame();
       portENTER_CRITICAL(&g_mux);
@@ -382,7 +674,8 @@ void crsfTask(void*) {
       portEXIT_CRITICAL(&g_mux);
 
       // Probe: once a second, ping the module and report the RX frame-type tally.
-      if (g_probe && (++frameCnt % TX_RATE_HZ == 0)) {
+      if (g_probe && millis() - probeMs >= 1000) {
+        probeMs = millis();
         sendPing();
         Serial.printf("[probe] 1s tally  sync=%u link=%u echo=%u INFO=%u other=%u\n", g_pc_sync,
                       g_pc_link, g_pc_echo, g_pc_info, g_pc_other);
@@ -393,24 +686,47 @@ void crsfTask(void*) {
     // Drain everything the module (and our echo) put on the wire.
     while (uart.available()) feed((uint8_t)uart.read());
 
-    // Fixed cadence (independent of TX/parse time) for a steady frame rate.
-    vTaskDelayUntil(&last, period);
+    // Absolute schedule (independent of TX/parse time). Param-write/command slots keep the
+    // proven fixed 4 ms spacing (the module needs ~24 ms of quiet wire for 6 copies).
+    next += special ? FALLBACK_PERIOD_US : nextPeriodUs();
+    int64_t wait = next - esp_timer_get_time();
+    if (wait < 50) {  // fell behind (or resumed after a pause): restart the schedule
+      wait = 50;
+      next = esp_timer_get_time() + wait;
+    }
+    esp_timer_stop(g_tick_timer);  // no-op unless a previous wait timed out
+    esp_timer_start_once(g_tick_timer, (uint64_t)wait);
+    ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(100));
   }
 }
 
 }  // namespace
 
+void crsf_set_restore(const uint8_t values[ELRS_SETTING_N]) {
+  for (int i = 0; i < ELRS_SETTING_N; ++i) g_restore[i] = values[i];
+  g_restore_next = 0;
+  g_restore_due = 0;
+}
+
 bool crsf_start() {
+  g_start_ms = millis();
   uart.begin(g_crsf_baud, SERIAL_8N1, PIN_CRSF_RX, PIN_CRSF_TX);
   uart.setTimeout(0);
 
+  if (!g_tick_timer) {
+    esp_timer_create_args_t args = {};
+    args.callback = tickCb;
+    args.dispatch_method = ESP_TIMER_TASK;
+    args.name = "crsf_tick";
+    esp_timer_create(&args, &g_tick_timer);
+  }
   BaseType_t ok = xTaskCreatePinnedToCore(crsfTask, "crsf", 4096, nullptr,
                                           /*priority=*/3, &g_task, /*core=*/0);
   if (ok != pdPASS) {
     Serial.println("[crsf] task create FAILED");
     return false;
   }
-  Serial.printf("[crsf] UART2 up @ %lu (AETR, 250 Hz, half-duplex)\n",
+  Serial.printf("[crsf] UART2 up @ %lu (AETR, synced to module, half-duplex)\n",
                 (unsigned long)g_crsf_baud);
   return true;
 }
@@ -472,6 +788,24 @@ void queueParamWrite(int field, int value) {
   g_power_idx = value;
   g_power_repeat = 6;
   portEXIT_CRITICAL(&g_mux);
+}
+
+int crsf_bind_state() { return g_bind_state; }
+
+void crsf_bind() {
+  uint32_t now = millis();
+  g_bind_t0 = now;
+  g_bind_next = now;
+  g_bind_tries = 0;
+  bool linked = linkUp(now, 1000);
+  if (!g_bind_field) {  // find the module's Lua Bind command first (once per boot)
+    g_scan_field = 1;
+    g_bind_state = BIND_SCAN;
+    Serial.println("[crsf] bind started: reading module menu");
+    return;
+  }
+  g_bind_state = linked ? BIND_RX : BIND_TX;  // a linked RX is told to bind first
+  Serial.printf("[crsf] bind started (%s)\n", linked ? "RX linked: RX first" : "module only");
 }
 
 void crsf_set_power(int level_index) {

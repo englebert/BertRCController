@@ -55,10 +55,18 @@ void storage_set_wifi_boot(bool v);
 uint16_t storage_get_telem_sel();
 void storage_set_telem_sel(uint16_t v);
 
-// Last fan-threshold option index we wrote to the module (for the UI's current marker).
-// Returns 0xFF when never set. The module itself is the source of truth.
-uint8_t storage_get_fan_thresh();
-void storage_set_fan_thresh(uint8_t v);
+// ELRS module settings the user last chose in the CRSF MODULE menu (option index per
+// setting), 0xFF = never set. The handset re-sends them to the module at every boot
+// (crsf_set_restore), so they survive a power cycle even if the module doesn't keep them.
+enum ElrsSetting : uint8_t {
+  ELRS_PKT_RATE,
+  ELRS_SWITCH_MODE,
+  ELRS_TX_POWER,
+  ELRS_FAN,
+  ELRS_SETTING_N
+};
+uint8_t storage_get_elrs(ElrsSetting s);
+void storage_set_elrs(ElrsSetting s, uint8_t v);
 
 // CRSF UART baud to the module (the module auto-detects it). Default 921600.
 uint32_t storage_get_crsf_baud();
