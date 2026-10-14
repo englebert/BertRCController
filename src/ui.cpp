@@ -141,7 +141,7 @@ bool safeSaveTelemSel(uint16_t sel) {  // persist main-screen telemetry selectio
 // Module settings last chosen in the CRSF MODULE menu (index = ElrsSetting, 0xFF = never).
 // Loaded once at boot (before the peripheral tasks run), re-sent to the module by the CRSF
 // task, and kept in sync with NVS by safeSaveElrs.
-uint8_t g_elrs[ELRS_SETTING_N] = {0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t g_elrs[ELRS_SETTING_N] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 bool safeSaveElrs(ElrsSetting s, uint8_t v) {  // remember a module setting we wrote
   g_elrs[s] = v;
@@ -1143,17 +1143,74 @@ int pktCurrentIndex(uint8_t rf_mode, bool link_ok) {
   return -1;
 }
 
-// --- Menu item: SWITCH MODE (ELRS field 3 on 3.4.x) — how many channels go over the air.
-// Blind write, value = option index, and the module's option list depends on the packet
-// rate: normal rates offer {Wide, Hybrid} — both carry CH1-12 only, so toggles mapped to
-// CH13-16 never reach the receiver. The FULL rates (100Hz FULL / 333Hz FULL) offer
-// {8ch, 16ch Rate/2, 12ch Mixed}; "16ch Rate/2" is the one that carries all 16 channels.
-// No telemetry read-back, so there is no "current" marker. The module only accepts a
-// switch-mode change while no receiver is connected. ---
-const char* const SWMODE_OPTS[] = {lp("0: Wide  | FULL: 8ch", "Wide/8ch"),
-                                   lp("1: Hybrid| FULL: 16ch Rate/2", "Hyb/16ch"),
-                                   lp("2:  -    | FULL: 12ch Mixed", "-/12ch Mix")};
-constexpr int SWMODE_N = 3;
+// --- Menu items: SWITCH MODE / TELEM RATIO / MODEL MATCH — the module's selection settings
+// (one shared page). Labels are the module's own option list, read back after each write
+// (crsf_get_setting), like the EdgeTX ELRS Lua; until it answers, the fallback list is used.
+// Green dot = the module's actual value, cyan = our stored choice (re-sent at boot).
+// SWITCH MODE: normal rates offer {Wide, Hybrid} (CH1-12 only); the FULL rates offer
+// {8ch, 16ch Rate/2, 12ch Mixed} — "16ch Rate/2" carries all 16 channels. The module only
+// accepts a switch-mode change while no receiver is connected (green dot shows it).
+// MODEL MATCH: Off = any model ID is accepted by the RX (never set = Off). ---
+struct SelPage {
+  ElrsSetting setting;
+  const char* title;
+  const char* fallback;  // ';'-separated, used until the module's own list is read
+};
+const SelPage SEL_PAGES[] = {
+    {ELRS_SWITCH_MODE, lp("SWITCH MODE", "SW MODE"), "Wide/8ch;Hybrid/16ch;-/12ch Mix"},
+    {ELRS_TLM_RATIO, lp("TELEM RATIO", "TLM RATIO"), "Std;Off;1:128;1:64;1:32;1:16;1:8;1:4;1:2;Race"},
+    {ELRS_MODEL_MATCH, lp("MODEL MATCH", "MDL MATCH"), "Off;On"},
+};
+constexpr int SEL_MAX = 12;
+char SEL_TXT[SEL_MAX][20];
+const char* SEL_PTR[SEL_MAX];
+
+// Split a ';'-separated option list into SEL_PTR; empty options (unavailable) show "-".
+int selLabels(const char* opts) {
+  int n = 0;
+  const char* o = opts;
+  while (n < SEL_MAX) {
+    const char* semi = strchr(o, ';');
+    int len = semi ? (int)(semi - o) : (int)strlen(o);
+    if (len) snprintf(SEL_TXT[n], sizeof(SEL_TXT[n]), "%.*s", len, o);
+    else snprintf(SEL_TXT[n], sizeof(SEL_TXT[n]), "-");
+    SEL_PTR[n] = SEL_TXT[n];
+    n++;
+    if (!semi) break;
+    o = semi + 1;
+  }
+  return n;
+}
+
+// --- CRSF MODULE -> RX SETTINGS: the receiver's own menu, read over the air
+// (crsf_rx_read). Read-only; folders and commands are left out. Last row = read status. ---
+char RXSET_TXT[25][40];
+const char* RXSET_PTR[25];
+
+int rxSetLabels() {
+  const CrsfRxParam* p = nullptr;
+  int cnt = crsf_rx_params(&p), n = 0;
+  for (int i = 0; i < cnt && n < 24; ++i) {
+    if (p[i].type == 11 || p[i].type == 13) continue;  // folder / command
+    if (PORTRAIT)
+      snprintf(RXSET_TXT[n], sizeof(RXSET_TXT[n]), "%.6s:%s", p[i].name, p[i].value);
+    else
+      snprintf(RXSET_TXT[n], sizeof(RXSET_TXT[n]), "%s: %s", p[i].name, p[i].value);
+    n++;
+  }
+  int total = 0, fld = crsf_rx_progress(&total), st = crsf_rx_read_state();
+  if (st == RXR_READING && total)
+    snprintf(RXSET_TXT[n], sizeof(RXSET_TXT[n]), lp("reading %d/%d...", "rd %d/%d"), fld, total);
+  else if (st == RXR_READING)
+    snprintf(RXSET_TXT[n], sizeof(RXSET_TXT[n]), "%s", lp("asking receiver...", "asking.."));
+  else if (st == RXR_NO_REPLY)
+    snprintf(RXSET_TXT[n], sizeof(RXSET_TXT[n]), "%s", lp("no reply - RX linked?", "no reply"));
+  else
+    snprintf(RXSET_TXT[n], sizeof(RXSET_TXT[n]), "%s", lp("done - OK reads again", "OK=reread"));
+  n++;
+  for (int i = 0; i < n; ++i) RXSET_PTR[i] = RXSET_TXT[i];
+  return n;
+}
 
 // --- Menu item: BAUD RATE (handset UART; module auto-detects). ---
 const char* const BAUD_OPTS[] = {"400000", "921600"};
@@ -1444,13 +1501,17 @@ void drawToggleListFull(int scroll, int cursor, bool editing, int field) {
 // CRSF MODULE submenu: OUTPUT toggle + links to the module-config pages + WiFi setup.
 const char* const CRSF_ITEMS[] = {
     "OUTPUT",                        "TX POWER",                    lp("FAN THRESHOLD", "FAN"),
-    lp("PACKET RATE", "PKT RATE"),   lp("SWITCH MODE", "SW MODE"),  "BAUD RATE",
-    lp("BLE JOYSTICK", "BLE JOY"),   lp("BIND RECEIVER", "BIND RX"), "WIFI SETUP"};
-constexpr int CRSF_N = 9;
+    lp("PACKET RATE", "PKT RATE"),   lp("SWITCH MODE", "SW MODE"),  lp("TELEM RATIO", "TLM RATIO"),
+    lp("MODEL MATCH", "MDL MATCH"),  "BAUD RATE",                   lp("BLE JOYSTICK", "BLE JOY"),
+    lp("BIND RECEIVER", "BIND RX"),  lp("RX SETTINGS", "RX SET"),   "WIFI SETUP"};
+constexpr int CRSF_N = 12;
 constexpr int CRSF_ITEM_OUTPUT = 0;
-constexpr int CRSF_ITEM_BLE = 6;
-constexpr int CRSF_ITEM_BIND = 7;
-constexpr int CRSF_ITEM_WIFI = 8;
+constexpr int CRSF_ITEM_SWMODE = 4;  // .. +2: SWITCH MODE, TELEM RATIO, MODEL MATCH (SEL_PAGES)
+constexpr int CRSF_ITEM_BAUD = 7;
+constexpr int CRSF_ITEM_BLE = 8;
+constexpr int CRSF_ITEM_BIND = 9;
+constexpr int CRSF_ITEM_RXSET = 10;
+constexpr int CRSF_ITEM_WIFI = 11;
 bool g_bindSent = false;  // BIND row shows "SENT" after OK (cleared on entering the page)
 
 // Compact live status (right side): module online + baud / actual RF rate. Change-driven
@@ -1620,8 +1681,8 @@ void configLoop() {
   // Main-menu pages come first (List..Reboot map to menu index via 1+sel); the CRSF
   // sub-pages follow and are reached only from the CRSF MODULE submenu.
   enum class Page : uint8_t {
-    List, Gimbals, Toggles, Battery, Telemetry, Crsf, Reboot, Power, Fan, PktRate, SwMode,
-    Baud
+    List, Gimbals, Toggles, Battery, Telemetry, Crsf, Reboot, Power, Fan, PktRate, ModSel,
+    Baud, RxSet
   };
   Page page = Page::List;
   int sel = 0;
@@ -1648,8 +1709,9 @@ void configLoop() {
   int fan_current = -2;  // last-written threshold (green dot); -2 = not yet loaded from NVS
   int pkt_cursor = 0, pkt_scroll = 0, pkt_tick = 0;  // PACKET RATE page
   int pkt_sent = g_elrs[ELRS_PKT_RATE] < PKT_N ? g_elrs[ELRS_PKT_RATE] : -1;
-  int swm_sent = g_elrs[ELRS_SWITCH_MODE] < SWMODE_N ? g_elrs[ELRS_SWITCH_MODE] : -1;
-  int swm_cursor = swm_sent >= 0 ? swm_sent : 0;  // SWITCH MODE page
+  // SWITCH MODE / TELEM RATIO / MODEL MATCH page (SEL_PAGES[sel_pg])
+  int sel_pg = 0, sel_cursor = 0, sel_scroll = 0, sel_n = 0, sel_val = -2;
+  char sel_opts[CRSF_OPTS_LEN] = "";
   if (pw_sent >= 0) pw_cursor = pw_sent;
   if (pkt_sent >= 0) pkt_cursor = pkt_sent;
   int baud_cursor = 0, baud_scroll = 0, baud_sent = -1;            // BAUD RATE page
@@ -2040,24 +2102,70 @@ void configLoop() {
         }
         break;
       }
-      case Page::SwMode: {
+      case Page::RxSet: {  // read-only list of the receiver's settings, filled as they arrive
+        static int rx_cursor = 0, rx_scroll = 0, rx_shown_n = -1, rx_shown_state = -1,
+                   rx_shown_field = -1;
+        int n = rxSetLabels();
+        int st = crsf_rx_read_state(), fld = crsf_rx_progress(nullptr);
+        bool changed = n != rx_shown_n || st != rx_shown_state || fld != rx_shown_field;
         if (redraw) {
-          drawSettingList("SWITCH MODE", 0, swm_cursor, SWMODE_OPTS, SWMODE_N, -1, swm_sent);
+          rx_cursor = 0;
+          rx_scroll = 0;
+        }
+        if (up && rx_cursor > 0) rx_cursor--, changed = true;
+        if (dn && rx_cursor < n - 1) rx_cursor++, changed = true;
+        if (rx_cursor < rx_scroll) rx_scroll = rx_cursor;
+        if (rx_cursor >= rx_scroll + LIST_VISIBLE) rx_scroll = rx_cursor - LIST_VISIBLE + 1;
+        if (redraw) {
+          drawSettingList("RX SETTINGS", rx_scroll, rx_cursor, RXSET_PTR, n, -1, -1);
           redraw = false;
+        } else if (changed) {
+          drawSettingRows(rx_scroll, rx_cursor, RXSET_PTR, n, -1, -1);
         }
-        if (up && swm_cursor > 0) {
-          swm_cursor--;
-          drawSettingRows(0, swm_cursor, SWMODE_OPTS, SWMODE_N, -1, swm_sent);
+        rx_shown_n = n;
+        rx_shown_state = st;
+        rx_shown_field = fld;
+        if (ok && st != RXR_READING) {  // read again
+          crsf_rx_read();
+          redraw = true;
         }
-        if (dn && swm_cursor < SWMODE_N - 1) {
-          swm_cursor++;
-          drawSettingRows(0, swm_cursor, SWMODE_OPTS, SWMODE_N, -1, swm_sent);
+        if (cx) {
+          page = Page::Crsf;
+          redraw = true;
         }
-        if (ok) {  // blind write field 3 = option index (meaning depends on the packet rate)
-          safeSaveElrs(ELRS_SWITCH_MODE, (uint8_t)swm_cursor);  // re-sent at every boot
-          crsf_param_set(CRSF_FIELD_SWITCH_MODE, swm_cursor);
-          swm_sent = swm_cursor;
-          drawSettingList("SWITCH MODE", 0, swm_cursor, SWMODE_OPTS, SWMODE_N, -1, swm_sent);
+        break;
+      }
+      case Page::ModSel: {
+        const SelPage& sp = SEL_PAGES[sel_pg];
+        char opts[CRSF_OPTS_LEN];
+        int mval = -1;
+        bool have = crsf_get_setting(sp.setting, &mval, opts, sizeof(opts));
+        if (!have) mval = -1;
+        bool rows = false;
+        if (redraw || mval != sel_val || (have && strcmp(opts, sel_opts))) {  // (re)read arrived
+          sel_n = selLabels(have ? opts : sp.fallback);
+          snprintf(sel_opts, sizeof(sel_opts), "%s", have ? opts : "");
+          sel_val = mval;
+          if (redraw) sel_cursor = g_elrs[sp.setting] < sel_n ? g_elrs[sp.setting] : (mval >= 0 ? mval : 0);
+          if (sel_cursor >= sel_n) sel_cursor = sel_n - 1;
+          rows = true;
+        }
+        int sent = g_elrs[sp.setting] < sel_n ? g_elrs[sp.setting] : -1;
+        if (up && sel_cursor > 0) sel_cursor--, rows = true;
+        if (dn && sel_cursor < sel_n - 1) sel_cursor++, rows = true;
+        if (sel_cursor < sel_scroll) sel_scroll = sel_cursor;
+        if (sel_cursor >= sel_scroll + LIST_VISIBLE) sel_scroll = sel_cursor - LIST_VISIBLE + 1;
+        if (ok) {  // write the option index to the module's field (found by name), re-read after
+          safeSaveElrs(sp.setting, (uint8_t)sel_cursor);  // re-sent at every boot
+          crsf_set_setting(sp.setting, sel_cursor);
+          sent = sel_cursor;
+          redraw = true;
+        }
+        if (redraw) {
+          drawSettingList(sp.title, sel_scroll, sel_cursor, SEL_PTR, sel_n, sel_val, sent);
+          redraw = false;
+        } else if (rows) {
+          drawSettingRows(sel_scroll, sel_cursor, SEL_PTR, sel_n, sel_val, sent);
         }
         if (cx) {
           page = Page::Crsf;
@@ -2169,8 +2277,16 @@ void configLoop() {
             case 1: page = Page::Power; redraw = true; break;
             case 2: page = Page::Fan; redraw = true; break;
             case 3: page = Page::PktRate; redraw = true; break;
-            case 4: page = Page::SwMode; redraw = true; break;
-            case 5: page = Page::Baud; redraw = true; break;
+            case CRSF_ITEM_SWMODE:
+            case CRSF_ITEM_SWMODE + 1:
+            case CRSF_ITEM_SWMODE + 2:
+              sel_pg = crsf_sel - CRSF_ITEM_SWMODE;
+              sel_scroll = 0;
+              crsf_refresh_setting(SEL_PAGES[sel_pg].setting);  // options follow the packet rate
+              page = Page::ModSel;
+              redraw = true;
+              break;
+            case CRSF_ITEM_BAUD: page = Page::Baud; redraw = true; break;
             case CRSF_ITEM_BLE:  // BLE JOYSTICK: on -> start BLE + silence CRSF; off -> resume
               if (!ble_on()) {
                 ble_set(true);
@@ -2185,6 +2301,11 @@ void configLoop() {
               crsf_bind();
               g_bindSent = true;
               drawCrsfMenuRow(crsf_sel - crsf_scroll, crsf_sel, true);
+              break;
+            case CRSF_ITEM_RXSET:  // read the receiver's own menu over the air
+              crsf_rx_read();
+              page = Page::RxSet;
+              redraw = true;
               break;
             case CRSF_ITEM_WIFI: crsf_confirm = true; redraw = true; break;
           }
@@ -2499,6 +2620,8 @@ void appTask(void*) {
   g_telemSel = storage_get_telem_sel();  // which telemetry items show on the RC screen
   crsf_set_baud(storage_get_crsf_baud());  // seed the CRSF baud before crsf_start()
   for (int i = 0; i < ELRS_SETTING_N; ++i) g_elrs[i] = storage_get_elrs((ElrsSetting)i);
+  // Model Match never chosen = Off (sent at boot so a module left with it On is reset).
+  if (g_elrs[ELRS_MODEL_MATCH] == 0xFF) g_elrs[ELRS_MODEL_MATCH] = 0;
   crsf_set_restore(g_elrs);  // re-send the stored module settings once CRSF is up
 
   tft.init();

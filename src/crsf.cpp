@@ -10,7 +10,9 @@
 #include "pins.h"
 #include "switches.h"
 
-void queueParamWrite(int field, int value);  // fwd decl (defined below, file scope)
+void queueParamWrite(int field, int value);     // fwd decls (defined below, file scope)
+void queueParamWriteRaw(int field, int value);
+void queueSettingWrite(ElrsSetting s, int value);
 
 namespace {
 
@@ -65,7 +67,7 @@ uint32_t g_crsf_baud = CRSF_BAUD_DEFAULT;  // active UART baud (module auto-dete
 volatile bool g_tx_enabled = true;  // false = stop transmitting RC (module fails safe)
 
 // Boot-time restore of the module settings (crsf_set_restore). Single-writer: the task.
-uint8_t g_restore[ELRS_SETTING_N] = {0xFF, 0xFF, 0xFF, 0xFF};
+uint8_t g_restore[ELRS_SETTING_N] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 int g_restore_next = 0;      // position in RESTORE_ORDER
 uint32_t g_restore_due = 0;  // millis() the next write may go out; 0 = not started yet
 uint32_t g_start_ms = 0;     // millis() at crsf_start()
@@ -76,17 +78,71 @@ uint32_t g_sync_ms = 0;       // millis() of the last 0x3A timing frame
 uint32_t g_last_rx_ms = 0;    // millis() of the last valid frame from the module
 bool g_module_alive = false;
 uint32_t g_ping_due = 0;      // millis() to send one device ping, 0 = none
-int g_bind_field = 0;   // module Lua field id of its "Bind" command, 0 = not found yet
+// Module Lua field ids, looked up by name at boot (fieldScan*), because they shift between
+// ELRS versions/builds (3.5 inserts "Link Mode": Max Power 6->7, Fan 8->9). 0 = not found.
+enum ElrsField {
+  EF_PKT_RATE, EF_SWITCH_MODE, EF_MAX_POWER, EF_FAN, EF_BIND, EF_TLM_RATIO, EF_MODEL_MATCH, EF_N
+};
+constexpr const char* FIELD_NAME[EF_N] = {"Packet Rate", "Switch Mode", "Max Power", "Fan Thresh",
+                                          "Bind", "Telem Ratio", "Model Match"};
+// Ids used before the scan finishes (ELRS 3.4.x order); 0 = no default, wait for the scan.
+constexpr int FIELD_DEFAULT[EF_N] = {CRSF_FIELD_PKT_RATE, CRSF_FIELD_SWITCH_MODE,
+                                     CRSF_FIELD_MAX_POWER, CRSF_FIELD_FAN, 0, 2, 0};
+// Module field behind each stored setting (index = ElrsSetting).
+constexpr ElrsField SETTING_FIELD[ELRS_SETTING_N] = {EF_PKT_RATE, EF_SWITCH_MODE, EF_MAX_POWER,
+                                                     EF_FAN, EF_TLM_RATIO, EF_MODEL_MATCH};
+int g_field[EF_N] = {0};
+bool g_scan_active = false, g_scan_done = false;
+int g_scan_next = 0;      // next field id to read
+int g_scan_pass = 0;      // 0 = first pass; later passes re-read fields that didn't answer
+uint64_t g_scan_seen = 0; // bit n = field n answered
+uint32_t g_scan_due = 0;  // millis() of the next read (or of finishing, once past the end)
 int g_param_count = 0;  // module's Lua field count (from DEVICE_INFO), 0 = unknown
 int g_read_field = -1;  // queued param read (field id), -2 = device ping, -1 = none
+uint8_t g_read_dest = 0xEE;  // queued read's destination (module, or receiver over the air)
+uint8_t g_read_chunk = 0;    // queued read's chunk number
+int g_rx_param_count = 0;    // receiver's Lua field count (its DEVICE_INFO), 0 = unknown
+
+// Module setting read-back (as the EdgeTX Lua shows them): full entries (all chunks) of the
+// selection fields below, re-read after the boot restore and after each write, so the menus
+// show the module's real value and its option list (switch-mode options follow the rate).
+constexpr uint8_t READBACK_FIELDS = 1 << EF_SWITCH_MODE | 1 << EF_TLM_RATIO | 1 << EF_MODEL_MATCH;
+struct ModSel {
+  bool valid;
+  uint8_t value;
+  char options[CRSF_OPTS_LEN];
+};
+ModSel g_msel[EF_N] = {};    // guarded by g_mux (the UI copies it)
+uint8_t g_mr_pending = 0;    // bit n = ElrsField n to read
+int g_mr_ef = -1;            // field being read, -1 = none
+uint8_t g_mr_chunk = 0, g_mr_tries = 0, g_mr_remain = 0;
+uint8_t g_mr_buf[160];
+int g_mr_len = 0;
+volatile bool g_mr_got = false;
+uint32_t g_mr_due = 0, g_mr_sent = 0;
+bool g_restore_done = false;
+
+// Receiver menu reader (crsf_rx_read). Requests go to the RX address (0xEC); the module
+// relays them over the air and the RX's PARAM_ENTRY replies come back as telemetry —
+// slowly (telemetry slots), and chunked for long entries, so each chunk gets a generous
+// timeout and a couple of retries. Single writer: the CRSF task.
+constexpr int RX_MAX_PARAMS = 24;
+CrsfRxParam g_rx_params[RX_MAX_PARAMS];
+volatile int g_rx_n = 0;              // entries filled
+volatile int g_rx_state = RXR_IDLE;
+volatile int g_rx_field = 0;          // field being read (progress)
+uint8_t g_rx_chunk = 0, g_rx_tries = 0;
+uint8_t g_rx_buf[256];
+int g_rx_len = 0;
+bool g_rx_got = false;                // a chunk for g_rx_field arrived
+uint8_t g_rx_remain = 0;              // chunks remaining after the one that arrived
+uint32_t g_rx_due = 0;
 esp_timer_handle_t g_tick_timer = nullptr;
 // Packet rate first: switch-mode option indices are only meaningful for the rate in force.
-constexpr ElrsSetting RESTORE_ORDER[] = {ELRS_PKT_RATE, ELRS_SWITCH_MODE, ELRS_TX_POWER,
-                                         ELRS_FAN};
-constexpr int RESTORE_FIELD[ELRS_SETTING_N] = {CRSF_FIELD_PKT_RATE, CRSF_FIELD_SWITCH_MODE,
-                                               CRSF_FIELD_MAX_POWER, CRSF_FIELD_FAN};
-constexpr const char* RESTORE_NAME[ELRS_SETTING_N] = {"packet rate", "switch mode",
-                                                      "TX power", "fan"};
+constexpr ElrsSetting RESTORE_ORDER[] = {ELRS_PKT_RATE,   ELRS_SWITCH_MODE, ELRS_TLM_RATIO,
+                                         ELRS_MODEL_MATCH, ELRS_TX_POWER,   ELRS_FAN};
+constexpr const char* RESTORE_NAME[ELRS_SETTING_N] = {"packet rate", "switch mode", "TX power",
+                                                      "fan", "telem ratio", "model match"};
 
 portMUX_TYPE g_mux = portMUX_INITIALIZER_UNLOCKED;
 CrsfLink g_link = {};
@@ -282,18 +338,47 @@ void handleFrame(uint8_t type, const uint8_t* payload, int plen) {
     int o = 2 + n + 1;
     if (o + 14 <= plen) {
       int cnt = payload[o + 12];
-      if (cnt != g_param_count)
-        Serial.printf("[crsf] module: '%.*s' ELRS %u.%u.%u, %d params\n", n, (const char*)&payload[2],
-                      payload[o + 9], payload[o + 10], payload[o + 11], cnt);
-      g_param_count = cnt;
+      bool mod = payload[1] == ADDR_MODULE;  // the receiver answers the broadcast ping too
+      if (!mod || cnt != g_param_count)
+        Serial.printf("[crsf] %s: '%.*s' ELRS %u.%u.%u, %d params\n", mod ? "module" : "receiver", n,
+                      (const char*)&payload[2], payload[o + 9], payload[o + 10], payload[o + 11], cnt);
+      if (mod) g_param_count = cnt;
+      else if (payload[1] == ADDR_RX) g_rx_param_count = cnt;
     }
   }
+  // Receiver menu entry chunk: [dest][origin 0xEC][field][chunks left][data...]; chunk 0's
+  // data starts with [parent][type][name\0], later chunks continue it. ELRS RXs address
+  // these to the TX module (0xEE), which just passes them on — accept either destination.
+  if (type == TYPE_PARAM_ENTRY && plen > 4 && payload[1] == ADDR_RX &&
+      (payload[0] == ADDR_RADIO || payload[0] == ADDR_MODULE) &&
+      g_rx_state == RXR_READING && payload[2] == g_rx_field && !g_rx_got) {
+    int n = plen - 4;
+    if (g_rx_len + n > (int)sizeof(g_rx_buf)) n = sizeof(g_rx_buf) - g_rx_len;
+    memcpy(g_rx_buf + g_rx_len, &payload[4], n);
+    g_rx_len += n;
+    g_rx_remain = payload[3];
+    g_rx_got = true;
+  }
+  // Module setting read-back chunk: [dest][origin 0xEE][field][chunks left][data...].
+  if (type == TYPE_PARAM_ENTRY && plen > 4 && payload[0] == ADDR_RADIO && payload[1] == ADDR_MODULE &&
+      g_mr_ef >= 0 && payload[2] == g_field[g_mr_ef] && !g_mr_got) {
+    int n = plen - 4;
+    if (g_mr_len + n > (int)sizeof(g_mr_buf)) n = sizeof(g_mr_buf) - g_mr_len;
+    memcpy(g_mr_buf + g_mr_len, &payload[4], n);
+    g_mr_len += n;
+    g_mr_remain = payload[3];
+    g_mr_got = true;
+  }
   // PARAM_ENTRY chunk 0: [dest][origin][field][chunks left][parent][type][name\0]...
-  if (type == TYPE_PARAM_ENTRY && plen > 7 && payload[0] == ADDR_RADIO) {
+  if (type == TYPE_PARAM_ENTRY && plen > 7 && payload[0] == ADDR_RADIO && payload[1] == ADDR_MODULE &&
+      g_scan_active) {
+    if (payload[2] < 64) g_scan_seen |= 1ULL << payload[2];
     const char* name = (const char*)&payload[6];
-    if ((payload[5] & 0x3F) == 0x0D && strnlen(name, plen - 6) == 4 && !strncmp(name, "Bind", 4)) {
-      if (g_bind_field != payload[2]) Serial.printf("[crsf] module Bind = field %u\n", payload[2]);
-      g_bind_field = payload[2];
+    int nlen = strnlen(name, plen - 6);
+    for (int i = 0; i < EF_N; ++i) {
+      if (nlen == (int)strlen(FIELD_NAME[i]) && !strncmp(name, FIELD_NAME[i], nlen) &&
+          (i != EF_BIND || (payload[5] & 0x3F) == 0x0D))  // Bind must be a COMMAND
+        g_field[i] = payload[2];
     }
   }
 
@@ -338,6 +423,15 @@ void handleFrame(uint8_t type, const uint8_t* payload, int plen) {
     g_link.batt_valid = true;
   }
   portEXIT_CRITICAL(&g_mux);
+
+  // Link log, once a second while link stats arrive.
+  static uint32_t s_link_log_ms = 0;
+  if (type == TYPE_LINK_STATISTICS && plen >= 10 && millis() - s_link_log_ms >= 1000) {
+    s_link_log_ms = millis();
+    Serial.printf("[link] LQ %u/%u RSSI %d/%d SNR %d/%d rf=%u ant=%u pw=%u\n",
+                  payload[2], payload[8], rssiDbm(payload[0]), rssiDbm(payload[7]),
+                  (int8_t)payload[3], (int8_t)payload[9], payload[5], payload[4], payload[6]);
+  }
 
   // Probe: tally frame types (printed once/sec by the task) + dump interesting ones.
   if (g_probe) {
@@ -482,6 +576,50 @@ int paramReadEntry(uint8_t field, uint8_t* data, int maxlen) {
   return -1;
 }
 
+// Module menu scan: read chunk 0 of every Lua field (one per 30 ms, interleaved with RC —
+// replies only come back in the window after a frame we send) and match names in
+// handleFrame. Field count comes from the boot ping; 48 if it never answered.
+void fieldScanStart() {
+  for (int i = 0; i < EF_N; ++i) g_field[i] = 0;
+  g_scan_active = true;
+  g_scan_done = false;
+  g_scan_next = 1;
+  g_scan_pass = 0;
+  g_scan_seen = 0;
+  g_scan_due = millis();
+}
+
+// Returns true while scanning (it owns the command slot).
+bool fieldScanStep() {
+  if (!g_scan_active) return false;
+  uint32_t now = millis();
+  if ((int32_t)(now - g_scan_due) < 0) return true;
+  int last = g_param_count > 0 ? g_param_count : 48;
+  // Skip fields that already answered (on retry passes).
+  while (g_scan_next <= last && g_scan_next < 64 && (g_scan_seen >> g_scan_next & 1)) g_scan_next++;
+  if (g_scan_next <= last) {
+    g_read_field = g_scan_next++;
+    g_scan_due = now + 30;
+    return true;
+  }
+  // End of a pass: wait for late replies, then retry the gaps (up to 3 passes), if the
+  // module answered at all (no ping reply = unknown count = don't retry 48 blanks).
+  if ((int32_t)(now - g_scan_due) < 300) return true;
+  bool gaps = false;
+  for (int f = 1; f <= last && f < 64; ++f)
+    if (!(g_scan_seen >> f & 1)) gaps = true;
+  if (gaps && g_param_count > 0 && ++g_scan_pass < 3) {
+    g_scan_next = 1;
+    return true;
+  }
+  g_scan_active = false;
+  g_scan_done = true;
+  Serial.printf("[crsf] module fields: rate=%d switch=%d power=%d fan=%d bind=%d tlm=%d mm=%d\n",
+                g_field[EF_PKT_RATE], g_field[EF_SWITCH_MODE], g_field[EF_MAX_POWER],
+                g_field[EF_FAN], g_field[EF_BIND], g_field[EF_TLM_RATIO], g_field[EF_MODEL_MATCH]);
+  return false;
+}
+
 // Called every task tick. Once the module first answers (it has locked our baud) or after
 // 3 s, whichever comes first: announce our model ID (ELRS holds RF until a handset sends
 // one, and keeps its settings per model), then queue the next stored setting each time the
@@ -501,6 +639,9 @@ void restoreStep() {
       Serial.println("[crsf] module came back — re-sending model ID + settings");
       g_restore_next = 0;
       g_restore_due = 0;
+      g_scan_done = false;  // it may have been reflashed: look the fields up again
+      g_param_count = 0;
+      g_restore_done = false;
     }
   }
   portENTER_CRITICAL(&g_mux);
@@ -515,15 +656,26 @@ void restoreStep() {
     g_restore_due = now + 300;
     return;
   }
+  if (!g_scan_done) {  // settings go to fields found by name, so scan the menu first
+    if (!g_scan_active && (int32_t)(now - g_restore_due) >= 0) fieldScanStart();
+    return;
+  }
 
   constexpr int N = sizeof(RESTORE_ORDER) / sizeof(RESTORE_ORDER[0]);
   while (g_restore_next < N && g_restore[RESTORE_ORDER[g_restore_next]] == 0xFF)
     g_restore_next++;  // skip settings never chosen
-  if (g_restore_next >= N) return;
+  if (g_restore_next >= N) {
+    if (!g_restore_done) {  // all written: read back what the module actually took
+      g_restore_done = true;
+      g_mr_pending |= READBACK_FIELDS;
+      g_mr_due = now + 500;
+    }
+    return;
+  }
   if (busy || (int32_t)(now - g_restore_due) < 0) return;
 
   ElrsSetting s = RESTORE_ORDER[g_restore_next++];
-  queueParamWrite(RESTORE_FIELD[s], g_restore[s]);
+  queueSettingWrite(s, g_restore[s]);
   Serial.printf("[crsf] restore %s = %u\n", RESTORE_NAME[s], g_restore[s]);
   // A packet-rate change re-inits the radio; give it longer before the next write.
   g_restore_due = now + (s == ELRS_PKT_RATE ? 1000 : 400);
@@ -541,7 +693,6 @@ void restoreStep() {
 // drops into bind mode (ELRS lua.cpp). Once the link drops, put the module into bind a
 // few times, spaced out, until the link comes back.
 volatile int g_bind_state = BIND_IDLE;
-int g_scan_field = 0;      // next field to read while looking for the Bind command
 uint32_t g_bind_t0 = 0, g_bind_next = 0;
 int g_bind_tries = 0;
 
@@ -557,19 +708,16 @@ bool bindStep() {
   int st = g_bind_state;
   if (st != BIND_SCAN && st != BIND_RX && st != BIND_TX) return false;
   uint32_t now = millis();
-  if (st == BIND_SCAN) {
-    int last = g_param_count > 0 ? g_param_count : 48;
-    if (g_bind_field || g_scan_field > last) {
-      if (!g_bind_field) Serial.println("[crsf] bind: no Bind field, using CRSF bind command");
+  if (st == BIND_SCAN) {  // wait for the module menu scan (started at boot)
+    if (!g_scan_active && !g_scan_done) fieldScanStart();
+    if (g_scan_done) {
+      if (!g_field[EF_BIND]) Serial.println("[crsf] bind: no Bind field, using CRSF bind command");
       bool linked = linkUp(now, 1000);
       g_bind_state = linked ? BIND_RX : BIND_TX;  // a linked RX is told to bind first
       g_bind_t0 = now;
       g_bind_next = now;
       g_bind_tries = 0;
       Serial.printf("[crsf] bind: %s\n", linked ? "RX linked, RX first" : "module only");
-    } else if ((int32_t)(now - g_bind_next) >= 0) {
-      g_read_field = g_scan_field++;  // one read per 30 ms; reply arrives a frame or two later
-      g_bind_next = now + 30;
     }
     return true;
   }
@@ -599,14 +747,171 @@ bool bindStep() {
       g_bind_state = BIND_FAILED;
       return false;
     }
-    if (g_bind_field)
-      queueParamWrite(g_bind_field, 1);  // "click" the module's Lua Bind command
+    if (g_field[EF_BIND])
+      queueParamWriteRaw(g_field[EF_BIND], 1);  // "click" the module's Lua Bind command
     else
       queueCommand(ADDR_MODULE, CMD_CRSF_BIND, -1, 3);
     g_bind_tries++;
     Serial.printf("[crsf] bind: module bind #%d\n", g_bind_tries);
     g_bind_next = now + 2500;
   }
+  return true;
+}
+
+// Decode one reassembled Lua entry ([parent][type][name\0][type data]) into name + value text.
+void rxDecodeEntry(int field, const uint8_t* b, int len) {
+  if (len < 3 || g_rx_n >= RX_MAX_PARAMS) return;
+  CrsfRxParam& e = g_rx_params[g_rx_n];
+  e.field = field;
+  e.type = b[1] & 0x3F;
+  e.hidden = b[1] & 0x80;
+  const char* name = (const char*)&b[2];
+  int nlen = strnlen(name, len - 2);
+  snprintf(e.name, sizeof(e.name), "%.*s", nlen, name);
+  const uint8_t* d = b + 2 + nlen + 1;  // type-specific data
+  int dl = len - (2 + nlen + 1);
+  e.value[0] = 0;
+  switch (e.type) {
+    case 9: {  // TEXT_SELECTION: options\0 value min max default units\0
+      int olen = dl > 0 ? strnlen((const char*)d, dl) : 0;
+      if (olen + 1 < dl) {
+        int v = d[olen + 1], i = 0;
+        const char* o = (const char*)d;
+        const char* end = o + olen;
+        while (i < v && o < end) {  // walk to option v
+          const char* semi = (const char*)memchr(o, ';', end - o);
+          if (!semi) { o = end; break; }
+          o = semi + 1;
+          i++;
+        }
+        const char* semi = (const char*)memchr(o, ';', end - o);
+        int ol = (semi ? semi : end) - o;
+        snprintf(e.value, sizeof(e.value), "%.*s", ol, o);
+        if (!e.value[0]) snprintf(e.value, sizeof(e.value), "#%d", v);
+      }
+      break;
+    }
+    case 0: case 1:  // UINT8 / INT8: value min max default units
+      if (dl >= 1) snprintf(e.value, sizeof(e.value), "%d", e.type ? (int)(int8_t)d[0] : (int)d[0]);
+      break;
+    case 2: case 3:  // UINT16 / INT16, big-endian
+      if (dl >= 2) {
+        int v = (d[0] << 8) | d[1];
+        snprintf(e.value, sizeof(e.value), "%d", e.type == 3 ? (int)(int16_t)v : v);
+      }
+      break;
+    case 10: case 12:  // STRING / INFO
+      if (dl > 0) snprintf(e.value, sizeof(e.value), "%.*s", (int)strnlen((const char*)d, dl), d);
+      break;
+    case 11: snprintf(e.value, sizeof(e.value), "[folder]"); break;
+    case 13: snprintf(e.value, sizeof(e.value), "[command]"); break;
+    default: snprintf(e.value, sizeof(e.value), "type %d", e.type); break;
+  }
+  Serial.printf("[crsf] rx %2d %-18s = %s%s\n", field, e.name, e.value, e.hidden ? " (hidden)" : "");
+  g_rx_n = g_rx_n + 1;
+}
+
+// Returns true when it queued a request this tick (it owns the read slot).
+bool rxReadStep() {
+  if (g_rx_state != RXR_READING) return false;
+  uint32_t now = millis();
+  if (g_rx_got) {  // a chunk arrived: ask for the next one, or decode the finished entry
+    g_rx_got = false;
+    g_rx_tries = 0;
+    if (g_rx_remain > 0) {
+      g_rx_chunk++;
+    } else {
+      rxDecodeEntry(g_rx_field, g_rx_buf, g_rx_len);
+      g_rx_field = g_rx_field + 1;
+      g_rx_chunk = 0;
+      g_rx_len = 0;
+    }
+    g_rx_due = now;
+  }
+  if (g_rx_param_count && g_rx_field > g_rx_param_count) {
+    g_rx_state = RXR_DONE;
+    Serial.printf("[crsf] rx menu read done (%d entries)\n", (int)g_rx_n);
+    return false;
+  }
+  if ((int32_t)(now - g_rx_due) < 0) return false;
+  if (!g_rx_param_count) {  // don't know the RX yet: ping it (broadcast) first
+    if (g_rx_tries >= 4) {
+      g_rx_state = RXR_NO_REPLY;
+      Serial.println("[crsf] rx menu read: receiver doesn't answer (not linked?)");
+      return false;
+    }
+    g_rx_tries++;
+    g_read_field = -2;
+    g_rx_due = now + 1500;
+    return true;
+  }
+  if (g_rx_tries >= 3) {  // this chunk never came: skip the field
+    Serial.printf("[crsf] rx %2d (no reply)\n", (int)g_rx_field);
+    g_rx_field = g_rx_field + 1;
+    g_rx_chunk = 0;
+    g_rx_len = 0;
+    g_rx_tries = 0;
+  }
+  g_rx_tries++;
+  g_read_field = g_rx_field;
+  g_read_chunk = g_rx_chunk;
+  g_read_dest = ADDR_RX;
+  g_rx_due = now + 2000;  // over the air + telemetry slots: be patient
+  return true;
+}
+
+// Decode a reassembled TEXT_SELECTION entry ([parent][type][name\0][options\0][value]...).
+void modDecode(int ef, const uint8_t* b, int len) {
+  if (len < 3 || (b[1] & 0x3F) != 9) return;
+  int nlen = strnlen((const char*)&b[2], len - 2);
+  const uint8_t* d = b + 2 + nlen + 1;
+  int dl = len - (2 + nlen + 1);
+  int olen = dl > 0 ? strnlen((const char*)d, dl) : 0;
+  if (olen + 1 >= dl) return;
+  portENTER_CRITICAL(&g_mux);
+  ModSel& m = g_msel[ef];
+  snprintf(m.options, sizeof(m.options), "%.*s", olen, (const char*)d);
+  m.value = d[olen + 1];
+  m.valid = true;
+  portEXIT_CRITICAL(&g_mux);
+  Serial.printf("[crsf] module %s = %u (%.*s)\n", FIELD_NAME[ef], d[olen + 1], olen, (const char*)d);
+}
+
+// Returns true when it queued a read this tick (it owns the read slot).
+bool modReadStep() {
+  if (!g_scan_done || g_scan_active) return false;
+  uint32_t now = millis();
+  if (g_mr_ef < 0) {
+    if (!g_mr_pending || (int32_t)(now - g_mr_due) < 0) return false;
+    int ef = __builtin_ctz(g_mr_pending);
+    g_mr_pending &= ~(1 << ef);
+    if (!g_field[ef]) return false;  // module doesn't have it
+    g_mr_ef = ef;
+    g_mr_chunk = 0;
+    g_mr_len = 0;
+    g_mr_tries = 0;
+    g_mr_got = false;
+  } else if (g_mr_got) {  // a chunk arrived: next chunk, or decode the finished entry
+    g_mr_got = false;
+    g_mr_tries = 0;
+    if (g_mr_remain == 0) {
+      modDecode(g_mr_ef, g_mr_buf, g_mr_len);
+      g_mr_ef = -1;
+      return false;
+    }
+    g_mr_chunk++;
+  } else if (now - g_mr_sent < 250) {
+    return false;  // waiting for the reply
+  } else if (g_mr_tries >= 4) {
+    Serial.printf("[crsf] module %s: no reply\n", FIELD_NAME[g_mr_ef]);
+    g_mr_ef = -1;
+    return false;
+  }
+  g_mr_tries++;
+  g_mr_sent = now;
+  g_read_field = g_field[g_mr_ef];
+  g_read_chunk = g_mr_chunk;
+  g_read_dest = ADDR_MODULE;
   return true;
 }
 
@@ -646,7 +951,10 @@ void crsfTask(void*) {
       g_ping_due = 0;
       g_read_field = -2;  // sentinel: device ping in the read slot
     }
-    if (pwr < 0 && cmd < 0 && !bindStep()) restoreStep();  // bind first; else model ID + settings
+    // Menu scan, then bind, then model ID + settings.
+    if (pwr < 0 && cmd < 0 && !fieldScanStep() && !bindStep() && !rxReadStep() &&
+        !modReadStep())
+      restoreStep();
     int rd = -1;
     if (pwr < 0 && cmd < 0) {
       rd = g_read_field;
@@ -665,8 +973,10 @@ void crsfTask(void*) {
     } else if (ping) {
       paramSendExt(TYPE_DEVICE_PING, ADDR_BROADCAST, nullptr, 0);
     } else if (rd >= 0) {
-      uint8_t args[2] = {(uint8_t)rd, 0};  // field, chunk 0 (has the name)
-      paramSendExt(TYPE_PARAM_READ, ADDR_MODULE, args, 2);
+      uint8_t args[2] = {(uint8_t)rd, g_read_chunk};  // field, chunk (chunk 0 has the name)
+      paramSendExt(TYPE_PARAM_READ, g_read_dest, args, 2);
+      g_read_dest = ADDR_MODULE;
+      g_read_chunk = 0;
     } else {
       sendRcFrame();
       portENTER_CRITICAL(&g_mux);
@@ -782,7 +1092,26 @@ bool crsf_telem_online() {
 }
 
 // Queue a parameter write the CRSF task sends by holding RC for ~6 ticks (the proven path).
+// field = one of the CRSF_FIELD_* defaults (crsf.h); translated to the id the module
+// actually uses, found by name at boot. Before the scan finishes the default is used; after
+// it, a setting the module doesn't have is skipped rather than written to a wrong field.
 void queueParamWrite(int field, int value) {
+  for (int i = 0; i < EF_N; ++i) {
+    if (FIELD_DEFAULT[i] != field) continue;
+    if (g_scan_done) {
+      if (!g_field[i]) {
+        Serial.printf("[crsf] module has no '%s' — write skipped\n", FIELD_NAME[i]);
+        return;
+      }
+      field = g_field[i];
+    }
+    break;
+  }
+  queueParamWriteRaw(field, value);
+}
+
+// A write to an exact module field id (no translation).
+void queueParamWriteRaw(int field, int value) {
   portENTER_CRITICAL(&g_mux);
   g_write_field = field;
   g_power_idx = value;
@@ -790,7 +1119,44 @@ void queueParamWrite(int field, int value) {
   portEXIT_CRITICAL(&g_mux);
 }
 
+// Write a stored setting to the module field found by name (skipped if the module has no
+// such field, or the scan hasn't found it yet and there's no safe default id).
+void queueSettingWrite(ElrsSetting s, int value) {
+  int ef = SETTING_FIELD[s];
+  int field = g_scan_done ? g_field[ef] : FIELD_DEFAULT[ef];
+  if (!field) {
+    Serial.printf("[crsf] module has no '%s' — write skipped\n", FIELD_NAME[ef]);
+    return;
+  }
+  queueParamWriteRaw(field, value);
+  if (READBACK_FIELDS >> ef & 1) {  // read back what the module made of it
+    g_mr_pending |= 1 << ef;
+    g_mr_due = millis() + 600;
+  }
+}
+
 int crsf_bind_state() { return g_bind_state; }
+
+void crsf_rx_read() {
+  g_rx_n = 0;
+  g_rx_field = 1;
+  g_rx_chunk = 0;
+  g_rx_len = 0;
+  g_rx_tries = 0;
+  g_rx_got = false;
+  g_rx_due = millis();
+  g_rx_state = RXR_READING;
+  Serial.println("[crsf] rx menu read started");
+}
+int crsf_rx_read_state() { return g_rx_state; }
+int crsf_rx_progress(int* total) {
+  if (total) *total = g_rx_param_count;
+  return g_rx_field;
+}
+int crsf_rx_params(const CrsfRxParam** out) {
+  if (out) *out = g_rx_params;
+  return g_rx_n;
+}
 
 void crsf_bind() {
   uint32_t now = millis();
@@ -798,14 +1164,37 @@ void crsf_bind() {
   g_bind_next = now;
   g_bind_tries = 0;
   bool linked = linkUp(now, 1000);
-  if (!g_bind_field) {  // find the module's Lua Bind command first (once per boot)
-    g_scan_field = 1;
+  if (!g_scan_done) {  // the module menu scan hasn't finished yet: wait for it
     g_bind_state = BIND_SCAN;
-    Serial.println("[crsf] bind started: reading module menu");
+    Serial.println("[crsf] bind started: waiting for module menu scan");
     return;
   }
   g_bind_state = linked ? BIND_RX : BIND_TX;  // a linked RX is told to bind first
   Serial.printf("[crsf] bind started (%s)\n", linked ? "RX linked: RX first" : "module only");
+}
+
+void crsf_set_setting(ElrsSetting s, int value) {
+  if (s >= ELRS_SETTING_N || value < 0 || value > 255) return;
+  queueSettingWrite(s, value);
+}
+
+void crsf_refresh_setting(ElrsSetting s) {
+  if (s >= ELRS_SETTING_N || !(READBACK_FIELDS >> SETTING_FIELD[s] & 1)) return;
+  g_mr_pending |= 1 << SETTING_FIELD[s];
+  g_mr_due = millis();
+}
+
+bool crsf_get_setting(ElrsSetting s, int* value, char* options, int optlen) {
+  if (s >= ELRS_SETTING_N) return false;
+  portENTER_CRITICAL(&g_mux);
+  const ModSel& m = g_msel[SETTING_FIELD[s]];
+  bool ok = m.valid;
+  if (ok) {
+    if (value) *value = m.value;
+    if (options && optlen > 0) snprintf(options, optlen, "%s", m.options);
+  }
+  portEXIT_CRITICAL(&g_mux);
+  return ok;
 }
 
 void crsf_set_power(int level_index) {

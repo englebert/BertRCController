@@ -134,7 +134,7 @@ void storage_set_telem_sel(uint16_t v) {
 
 // NVS key per ElrsSetting (the fan keeps its original key so a stored value carries over).
 constexpr const char* KEY_ELRS[ELRS_SETTING_N] = {"elrspkt", "elrsswm", "elrspwr",
-                                                  KEY_FAN_THRESH};
+                                                  KEY_FAN_THRESH, "elrstlm", "elrsmm"};
 
 uint8_t storage_get_elrs(ElrsSetting s) {
   if (!g_open || s >= ELRS_SETTING_N) return 0xFF;

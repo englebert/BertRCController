@@ -125,10 +125,19 @@ UART0 pins 1/3 · display MISO (panel is write-only).
 - **Switch mode / channel count:** ELRS only carries **CH1–12** over the air in its normal
   switch modes (Wide/Hybrid), so toggles mapped to CH13–16 (default Toggle9/10) never reach
   the receiver. All 16 need a FULL packet rate (100Hz FULL / 333Hz FULL) **and** Switch Mode
-  "16ch Rate/2". SWITCH MODE menu = blind 0x2D write to field **3** (ELRS 3.4.x), value =
-  option index: normal rates {0 Wide, 1 Hybrid}, FULL rates {0 8ch, 1 16ch Rate/2, 2 12ch
-  Mixed}. No read-back; the module ignores the change while a receiver is connected.
-  (Field id and option order are from the ELRS source as recalled — not yet verified live.)
+  "16ch Rate/2". Value = option index: normal rates {0 Wide, 1 Hybrid}, FULL rates {0 8ch,
+  1 16ch Rate/2, 2 12ch Mixed}. The module ignores the change while a receiver is connected.
+- **SWITCH MODE / TELEM RATIO / MODEL MATCH** (CRSF MODULE menu, one shared `Page::ModSel`,
+  `SEL_PAGES` in `ui.cpp`): writes go through `crsf_set_setting(ElrsSetting, idx)` to the
+  field found by name ("Switch Mode", "Telem Ratio", "Model Match"). These three are **read
+  back** from the module (full multi-chunk PARAM_ENTRY, `modReadStep()`) after the boot
+  restore, ~600 ms after each write, and on entering the page: the list shows the module's
+  own option labels (switch-mode options follow the packet rate) and the green dot is its
+  actual value (`crsf_get_setting`); log `[crsf] module <name> = <v> (<options>)`.
+  Telem Ratio (3.5): Std;Off;1:128;1:64;1:32;1:16;1:8;1:4;1:2;Race. **Model Match never set =
+  Off** and is sent at boot (with Off the RX accepts any model ID). Stored in NVS like the
+  others (`elrstlm`, `elrsmm`); restore order rate → switch → tlm → model match → power → fan.
+  ELRS 3.5.6 ids here: rate 1, tlm 2, switch 3, mm 5, power 7, fan 9, bind 31.
 - **Bind:** CRSF MODULE → BIND RECEIVER runs `crsf_bind()`, a non-blocking state machine
   (`bindStep()` in the CRSF task). Frame: CRSF command (type **0x32**, origin 0xEA,
   `0x10 0x01` = CRSF/BIND, inner CRC poly **0xBA**, then the frame CRC). ELRS 3.4 facts:
@@ -148,8 +157,26 @@ UART0 pins 1/3 · display MISO (panel is write-only).
 - **Module identity at boot:** a device ping goes out right after the model ID; the
   DEVICE_INFO reply is logged as `[crsf] module: '<name>' ELRS x.y.z, N params`. Pings and
   param reads DO get answered now that frames are synced to the module (the old "discovery
-  never replies" note predates sync). Field ids in this file were derived from 3.4.x source;
-  3.0.0's Lua registration order for the fields we write (1/3/6/8) is the same.
+  never replies" note predates sync). The receiver may answer the broadcast ping too
+  (logged as `receiver: ...`; this one is 'SB Nano 2G4 RX' ELRS 3.5.6).
+- **Field ids are looked up by name, not hard-coded.** They shift between ELRS versions
+  (3.5 inserts "Link Mode" after Switch Mode: Max Power 6→7, Fan 8→9, and 8 becomes
+  Dynamic Power). At boot, after the ping and before the settings restore, the task reads
+  chunk 0 of every field (`fieldScanStart/Step`, ~1.5 s) and matches "Packet Rate",
+  "Switch Mode", "Max Power", "Fan Thresh", "Bind". `queueParamWrite()` translates the
+  `CRSF_FIELD_*` defaults (1/3/6/8, used before the scan finishes) to the found ids and
+  **skips** a setting the module doesn't have. Rescanned when the module comes back after a
+  reset (it may have been reflashed). Logged as `[crsf] module fields: rate=.. bind=..`
+  (ELRS 3.0.0 here: 1/3/6/8, bind 30). Option *indices* are still assumed unchanged.
+  Replies get lost occasionally, so the scan makes up to 3 passes over fields that
+  didn't answer (a single pass once missed Max Power and skipped the TX power restore).
+- **RX SETTINGS (CRSF MODULE menu):** reads the receiver's own Lua menu over the air
+  (`crsf_rx_read()`): PARAM_READ to dest **0xEC**, which the module relays as MSP; replies
+  come back as telemetry, chunked, **addressed to the module (0xEE) with origin 0xEC** —
+  not to 0xEA, so filter on origin. ~3 s for 12 fields; 2 s timeout + retries per chunk;
+  field count from the RX's ping reply. Read-only list (folders/commands hidden), OK
+  re-reads; also logged as `[crsf] rx <n> <name> = <value>`. This RX ('SB Nano 2G4 RX',
+  ELRS 3.5.6): Protocol CRSF, Bind Storage **Persistent**, Model Id Off.
 - **Module settings are re-sent at every boot.** PACKET RATE, SWITCH MODE, TX POWER and FAN
   choices are stored in NVS (`storage_get/set_elrs`, keys `elrspkt`/`elrsswm`/`elrspwr`/
   `fanthr`) and the CRSF task writes them back to the module once it first answers (or

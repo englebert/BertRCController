@@ -63,6 +63,8 @@ enum ElrsSetting : uint8_t {
   ELRS_SWITCH_MODE,
   ELRS_TX_POWER,
   ELRS_FAN,
+  ELRS_TLM_RATIO,    // "Telem Ratio" option index (Std;Off;1:128;...;Race)
+  ELRS_MODEL_MATCH,  // "Model Match" 0 = Off, 1 = On (never set = Off)
   ELRS_SETTING_N
 };
 uint8_t storage_get_elrs(ElrsSetting s);

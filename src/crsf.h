@@ -54,6 +54,33 @@ enum CrsfBindState { BIND_IDLE, BIND_SCAN, BIND_RX, BIND_TX, BIND_DONE, BIND_FAI
 void crsf_bind();
 int crsf_bind_state();
 
+// Receiver menu (Lua params) read over the air, e.g. to check "Bind Storage". Non-blocking:
+// start with crsf_rx_read(), poll the state; entries fill in as they arrive.
+enum CrsfRxReadState { RXR_IDLE, RXR_READING, RXR_DONE, RXR_NO_REPLY };
+struct CrsfRxParam {
+  uint8_t field;
+  uint8_t type;     // CRSF Lua type (9 = selection, 11 = folder, 13 = command, ...)
+  bool hidden;
+  char name[20];
+  char value[20];   // decoded current value ("Persistent", "42", "[folder]", ...)
+};
+void crsf_rx_read();
+int crsf_rx_read_state();
+int crsf_rx_progress(int* total);  // field being read; *total = RX field count (0 = unknown)
+int crsf_rx_params(const CrsfRxParam** out);  // entries read so far
+
+// Module settings by name (ElrsSetting -> the module's Lua field, looked up at boot, so ids
+// that shift between ELRS versions don't matter). crsf_set_setting queues a write (skipped if
+// the module has no such field). Switch Mode, Telem Ratio and Model Match are read back from
+// the module afterwards (and after the boot restore): crsf_get_setting returns its actual
+// value and ';'-separated option list (false until read). crsf_refresh_setting re-reads one,
+// e.g. on entering its menu page (switch-mode options change with the packet rate).
+// Switch Mode only changes while no receiver is connected (ELRS rule) - the read-back shows it.
+constexpr int CRSF_OPTS_LEN = 72;
+void crsf_set_setting(ElrsSetting s, int value);
+void crsf_refresh_setting(ElrsSetting s);
+bool crsf_get_setting(ElrsSetting s, int* value, char* options, int optlen);
+
 // Map the CRSF TX-power index to milliwatts (0 for unknown index).
 uint16_t crsf_tx_power_mw(uint8_t idx);
 
