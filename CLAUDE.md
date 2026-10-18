@@ -35,8 +35,9 @@ pio run -e pocket -t upload  # POCKETVERSION variant (portrait display) — see 
   (`!PANEL_LANDSCAPE`) and uses `lp(landscape, portrait)` for labels that need a short
   portrait form. Landscape numbers are hardware-tuned — don't change them when editing the
   portrait side, and build **both** envs (`pio run -e esp32 -e pocket`) after any UI change.
-- **Pocket battery = 1S** (max 4.2 V): battery % maps 3.0–4.2 V (`VBAT_CELLS` in `ui.cpp`);
-  the standard build stays 2S (6.0–8.4 V).
+- **Battery = 2S in both builds** (6.0–8.4 V = 0–100 %, `VBAT_CELLS` in `ui.cpp`). The pocket
+  build was 1S + step-up; the step-up's noise corrupted the ELRS module's CRSF line, so it
+  is now 2S + step-down. Don't go back to a step-up converter near the module.
 - **Pocket menu mode = BOOT button, not Toggle6.** Each press of BOOT (GPIO0, `PIN_BOOT_BTN`)
   flips RC screen ↔ configuration mode (latched in a GPIO ISR, 250 ms debounce; always
   boots to the RC screen). `menuModeOn()` in `ui.cpp` is the single mode source for both
@@ -205,6 +206,12 @@ UART0 pins 1/3 · display MISO (panel is write-only).
   seeded before `crsf_start()`. **Coupling:** at 400000 on this half-duplex single-wire module
   the module **caps packet rate at ~333 Hz** (`adjustPacketRateForBaud`) — 500Hz/F1000 need
   **921600**. The PACKET RATE green dot (actual rf_Mode) and the CRSF page RATE line show it.
+- **CRSF OUTPUT (CRSF MODULE menu) is remembered:** OK toggles it and saves it to NVS
+  (`storage_get/set_crsf_output`, key `crsfout`, default on); `appTask` applies it before
+  `crsf_start()`, so the handset boots with the module's CRSF feed on or off as last left
+  (RC screen shows red "TX OFF"). Off = no frames at all, so the module fails safe and, if
+  "Auto On WiFi" is enabled, starts its WiFi after ~60 s. BLE JOYSTICK silences CRSF on its
+  own without touching the saved choice, and restores it when turned off.
 - **BLE gamepad (FPV sim):** `ble.cpp` — the handset presents as a BLE HID gamepad "BertRC"
   (4 calibrated gimbal axes + 10 toggle buttons, ~50 Hz) via ESP32-BLE-Gamepad + NimBLE 2.x
   (builds on arduino-esp32 3.1.3). Enabled from CRSF MODULE → BLE JOYSTICK; ON silences CRSF

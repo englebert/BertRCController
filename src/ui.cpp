@@ -47,13 +47,9 @@ int fitFont(const char* s, int maxFont, int avail) {
   return 1;
 }
 
-// Battery % mapping, 3.0 V/cell = 0%, 4.2 V/cell = 100%. The standard handset runs a 2S
-// pack (6.0..8.4 V); the POCKETVERSION is 1S only (3.0..4.2 V).
-#ifdef POCKETVERSION
-constexpr int VBAT_CELLS = 1;
-#else
+// Battery % mapping, 3.0 V/cell = 0%, 4.2 V/cell = 100%. Both builds run a 2S pack
+// (6.0..8.4 V); the POCKETVERSION was 1S with a step-up, now 2S with a step-down.
 constexpr int VBAT_CELLS = 2;
-#endif
 constexpr float VBAT_MIN = 3.0f * VBAT_CELLS;
 constexpr float VBAT_MAX = 4.2f * VBAT_CELLS;
 
@@ -1604,6 +1600,21 @@ void drawCrsfMenu(int scroll, int cursor) {
   }
 }
 
+// CRSF OUTPUT on/off, remembered across power cycles (BLE JOYSTICK silences CRSF on its own
+// and restores this choice when it's turned off).
+bool g_crsfOutput = true;
+void safeSetCrsfOutput(bool on) {
+  g_crsfOutput = on;
+  crsf_set_output(on);
+  crsf_pause();
+  gimbals_pause();
+  switches_pause();
+  storage_set_crsf_output(on);
+  switches_resume();
+  gimbals_resume();
+  crsf_resume();
+}
+
 // NVS write for the WiFi-boot flag with interrupt-heavy peripherals quiesced.
 bool safeSetWifiBoot(bool v) {
   crsf_pause();
@@ -2270,8 +2281,9 @@ void configLoop() {
         }
         if (ok) {
           switch (crsf_sel) {
-            case 0:  // OUTPUT toggle
-              crsf_set_output(!crsf_output_enabled());
+            case 0:  // OUTPUT toggle (saved: the next boot starts the same way)
+              if (ble_on()) break;  // BLE JOYSTICK owns the output while it's on
+              safeSetCrsfOutput(!crsf_output_enabled());
               drawCrsfMenuRow(crsf_sel - crsf_scroll, crsf_sel, true);
               break;
             case 1: page = Page::Power; redraw = true; break;
@@ -2293,7 +2305,7 @@ void configLoop() {
                 crsf_set_output(false);
               } else {
                 ble_set(false);
-                crsf_set_output(true);
+                crsf_set_output(g_crsfOutput);  // back to the saved OUTPUT choice
               }
               drawCrsfMenu(crsf_scroll, crsf_sel);  // OUTPUT + BLE rows both changed
               break;
@@ -2619,6 +2631,8 @@ void appTask(void*) {
   gconfig_init();  // load per-channel flip flags (default none) before CRSF uses them
   g_telemSel = storage_get_telem_sel();  // which telemetry items show on the RC screen
   crsf_set_baud(storage_get_crsf_baud());  // seed the CRSF baud before crsf_start()
+  g_crsfOutput = storage_get_crsf_output();  // OUTPUT on/off as last left
+  crsf_set_output(g_crsfOutput);
   for (int i = 0; i < ELRS_SETTING_N; ++i) g_elrs[i] = storage_get_elrs((ElrsSetting)i);
   // Model Match never chosen = Off (sent at boot so a module left with it On is reset).
   if (g_elrs[ELRS_MODEL_MATCH] == 0xFF) g_elrs[ELRS_MODEL_MATCH] = 0;

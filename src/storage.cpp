@@ -17,6 +17,7 @@ constexpr const char* KEY_TFUNC = "tfunc";
 constexpr const char* KEY_TPIN = "tpin";
 constexpr const char* KEY_TINV = "tinv";
 constexpr const char* KEY_WIFI_BOOT = "wifiboot";
+constexpr const char* KEY_CRSF_OUT = "crsfout";
 constexpr const char* KEY_TOTAL_FLIGHT = "tflight";
 constexpr const char* KEY_TELEM_SEL = "telemsel";
 constexpr const char* KEY_FAN_THRESH = "fanthr";
@@ -121,6 +122,15 @@ bool storage_get_wifi_boot() {
 
 void storage_set_wifi_boot(bool v) {
   if (g_open) prefs.putBool(KEY_WIFI_BOOT, v);
+}
+
+bool storage_get_crsf_output() {
+  if (!g_open || !prefs.isKey(KEY_CRSF_OUT)) return true;  // never set: on (no NVS error log)
+  return prefs.getBool(KEY_CRSF_OUT, true);
+}
+
+void storage_set_crsf_output(bool on) {
+  if (g_open) prefs.putBool(KEY_CRSF_OUT, on);
 }
 
 uint16_t storage_get_telem_sel() {

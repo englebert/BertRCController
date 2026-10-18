@@ -51,6 +51,11 @@ bool storage_save_toggle_funcs(const uint8_t in[10]);
 bool storage_get_wifi_boot();
 void storage_set_wifi_boot(bool v);
 
+// CRSF OUTPUT (CRSF MODULE menu): whether the handset sends CRSF to the module. Default on;
+// remembered across power cycles.
+bool storage_get_crsf_output();
+void storage_set_crsf_output(bool on);
+
 // Bitmask of telemetry items shown on the main RC screen (bit i = item i). Default 0.
 uint16_t storage_get_telem_sel();
 void storage_set_telem_sel(uint16_t v);
