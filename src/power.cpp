@@ -18,10 +18,15 @@ constexpr float SHUNT_OHMS = 0.025f;
 constexpr float MAX_CURRENT_A = 3.274f;
 
 // Bus-voltage calibration: single-point gain trim so the reading matches a meter.
-// Measured meter 6.70 V vs INA226 6.21 V -> 6.70/6.21. NOTE: this corrects a constant
-// gain error; if the discrepancy is actually IR drop it grows with current, so re-check
-// against the meter at your normal operating load and retune if needed.
+// Per board: pocket (2S + step-down) meter 7.87 V vs INA226 raw 8.268 V; standard handset
+// meter 6.70 V vs 6.21 V. NOTE: this corrects a constant gain error; if the discrepancy is
+// actually IR drop it grows with current, so re-check against the meter at your normal
+// operating load and retune if needed.
+#ifdef POCKETVERSION
+constexpr float VBUS_SCALE = 7.87f / 8.268f;  // = 0.9519
+#else
 constexpr float VBUS_SCALE = 6.70f / 6.21f;  // = 1.0789
+#endif
 constexpr float FULL_SCALE_mA = MAX_CURRENT_A * 1000.0f;
 constexpr float NEAR_FULL_mA = FULL_SCALE_mA * 0.90f;  // flag within ~10% of ceiling
 
